@@ -7,3 +7,7 @@ train.csv
 train_audio/
 train_soundscapes/
 train_soundscapes_labels.csv
+models/
+submission.csv
+__pycache__/
+*.pyc

@@ -1,3 +1,5 @@
+import os
+from pathlib import Path
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score
 from torch.optim import optimizer
@@ -34,9 +36,10 @@ def mixup_criterion(criterion, pred, y_a, y_b, lam):
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"目前運算裝置是: {device}")
-    h5_path = 'processed_data/train_spectrograms.h5'
+    base_dir = Path(os.path.dirname(os.path.abspath(__file__))).parent
+    h5_path = base_dir / 'processed_data/train_spectrograms.h5'
     keys = []
-    with h5py.File(h5_path, 'r') as f:
+    with h5py.File(str(h5_path), 'r') as f:
         for group in f.keys():
             for dset in f[group].keys():
                 keys.append(f"{group}/{dset}")
@@ -143,7 +146,7 @@ def main():
         if val_f1 > best_f1:
             best_f1 = val_f1
             counter = 0
-            torch.save(model.state_dict(), 'best_bird_model.pth')
+            torch.save(model.state_dict(), base_dir / 'models' / 'best_bird_model.pth')
             print("==> 🌟 突破紀錄！最佳模型已儲存")
         else:
             counter += 1

@@ -57,7 +57,7 @@ def main():
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=1e-3)
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler('cuda')
 
     epochs = 30
     print("開始訓練")
@@ -76,7 +76,7 @@ def main():
 
             optimizer.zero_grad()
 
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 use_mixup = np.random.rand() >0.5
 
                 if use_mixup:
@@ -119,7 +119,7 @@ def main():
             for images,labels in val_loader:
                 images, labels = images.to(device), labels.to(device)
 
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast('cuda'):
                     outputs = model(images)
                 
                 _,predicted = torch.max(outputs, 1)

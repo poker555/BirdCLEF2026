@@ -34,9 +34,8 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"目前運算裝置是: {device}")
     
-    # 這裡的路徑假設您在 d:\BirdCLEF2026 目錄底下執行 python script/train_panns.py
-    # 確保抓取到正確的 CSV 路徑
-    base_dir = Path("d:/BirdCLEF2026")
+    # 路徑自動偵測：從腳本位置往上找專案根目錄
+    base_dir = Path(os.path.dirname(os.path.abspath(__file__))).parent
     train_csv = base_dir / "train.csv"
     labels_csv = base_dir / "taxonomy_encoded.csv"
     audio_dir = base_dir / "train_audio"
@@ -144,7 +143,7 @@ def main():
             best_f1 = val_f1
             counter = 0
             # 儲存到 d:\BirdCLEF2026\best_panns_model.pth
-            torch.save(model.state_dict(), base_dir / 'best_panns_model.pth')
+            torch.save(model.state_dict(), base_dir / 'models' / 'best_panns_model.pth')
             print("==> 🌟 突破紀錄！最佳模型已儲存")
         else:
             counter += 1

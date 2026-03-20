@@ -9,7 +9,6 @@ import torch.nn.functional as F
 import warnings
 
 import sys
-import sys
 try:
     script_dir = os.path.dirname(os.path.abspath(__file__))
 except NameError:
@@ -48,7 +47,7 @@ class ConvBlock(nn.Module):
         return x
 
 class PANNsCNN10(nn.Module):
-    def __init__(self, sample_rate=32000, window_size=1024, hop_size=320, mel_bins=64, classes_num=234):
+    def __init__(self, sample_rate=32000, window_size=1024, hop_size=320, mel_bins=128, classes_num=234):
         super(PANNsCNN10, self).__init__()
         self.mel_spectrogram = torchaudio.transforms.MelSpectrogram(
             sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size, 
@@ -213,8 +212,8 @@ def main():
         # 本地端測試路徑 (依據要求使用 train_audio)
         test_dir = base_dir / 'train_audio'
         sample_sub_path = base_dir / 'sample_submission.csv'
-        panns_model_path = base_dir / 'best_panns_model.pth'
-        cnn_model_path = base_dir / 'best_bird_model.pth'
+        panns_model_path = base_dir / 'models' / 'best_panns_model.pth'
+        cnn_model_path = base_dir / 'models' / 'best_bird_model.pth'
         is_kaggle = False
         print("偵測到本地測試環境！")
         

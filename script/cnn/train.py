@@ -9,8 +9,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import h5py
 
-from cnn.dataset import BirdDataset
-from cnn.model import BirdModel
+from dataset import BirdDataset
+from model import BirdModel
 
 def mixup_data(x, y, alpha=0.2):
     if alpha > 0:
@@ -50,21 +50,17 @@ def main():
     train_dataset = BirdDataset(h5_path, keys_train)
     val_dataset = BirdDataset(h5_path, keys_val)
 
-    # 啟動多核心並行載入資料 (num_workers=8)，並裝滿 VRAM 以吃滿 GPU
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=8, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=8, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
 
     model = BirdModel(num_classes=234).to(device)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=1e-3)
-    
-    # 動態學習率 (ReduceLROnPlateau)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
-    scaler = torch.amp.GradScaler('cuda')
+    scaler = torch.cuda.amp.GradScaler()
 
-    epochs = 100
-    print("開始 CNN 模型訓練")
+    epochs = 30
+    print("開始訓練")
 
     patience = 5
     best_f1 = 0.0
@@ -80,7 +76,7 @@ def main():
 
             optimizer.zero_grad()
 
-            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            with torch.cuda.amp.autocast():
                 use_mixup = np.random.rand() >0.5
 
                 if use_mixup:
@@ -123,7 +119,7 @@ def main():
             for images,labels in val_loader:
                 images, labels = images.to(device), labels.to(device)
 
-                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                with torch.cuda.amp.autocast():
                     outputs = model(images)
                 
                 _,predicted = torch.max(outputs, 1)
@@ -132,24 +128,17 @@ def main():
                 all_targets.extend(labels.cpu().numpy())
 
         val_f1 = f1_score(all_targets, all_preds, average='macro')
-        
-        # 取得當前的學習率
-        current_lr = optimizer.param_groups[0]['lr']
-        print(f"Epoch {epoch+1} 驗證 F1 Score: {val_f1:.4f} | 當前學習率: {current_lr:.6f}")
+        print(f"Epoch{epoch+1} 驗證F1 Score: {val_f1:.4f}")
 
-        # 呼叫動態學習率排程器 (依據 val_f1 的表現來決定是否要降學習率)
-        scheduler.step(val_f1)
-
-        if val_f1 > best_f1:
+        if val_f1 >best_f1:
             best_f1 = val_f1
             counter = 0
             torch.save(model.state_dict(), 'best_bird_model.pth')
-            print("==> 🌟 突破紀錄！最佳模型已儲存")
         else:
             counter += 1
-            print(f"F1 分數沒有提升，累積 {counter} 次 (距 Early Stopping 還有 {patience - counter} 次)")
+            print(f"F1分數沒有提破{counter}次")
             if counter >= patience:
-                print('\n==> ⛔ 達到 Early Stopping 條件，提早結束訓練！')
+                print('earlystoping')
                 break
 
     

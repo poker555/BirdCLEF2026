@@ -47,7 +47,7 @@ class ConvBlock(nn.Module):
         return x
 
 class PANNsCNN10(nn.Module):
-    def __init__(self, sample_rate=32000, window_size=1024, hop_size=320, mel_bins=128, classes_num=234):
+    def __init__(self, sample_rate=32000, window_size=1024, hop_size=320, mel_bins=128, classes_num=234, num_groups=5):
         super(PANNsCNN10, self).__init__()
         self.mel_spectrogram = torchaudio.transforms.MelSpectrogram(
             sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size, 
@@ -61,7 +61,8 @@ class PANNsCNN10(nn.Module):
         self.conv_block4 = ConvBlock(in_channels=256, out_channels=512)
         self.fc1 = nn.Linear(512, 512, bias=True)
         self.fc_audioset = nn.Linear(512, classes_num, bias=True)
-        self.fc_class = nn.Linear(512, 5, bias=True)  # 輔助頭，推論時不使用
+        # 輔助分類頭：大類（權重需存在，推論時不使用）
+        self.fc_class = nn.Linear(512, num_groups, bias=True)
         init_layer(self.fc1)
         init_layer(self.fc_audioset)
         init_layer(self.fc_class)
@@ -88,23 +89,31 @@ class PANNsCNN10(nn.Module):
 
 # --- CNN Backbone 相關架構 ---
 class BirdModel(nn.Module):
-    def __init__(self, model_name='tf_efficientnet_b0_ns', num_classes=234):
-        super(BirdModel,self).__init__()
-        
+    def __init__(self, model_name='tf_efficientnet_b0_ns', num_classes=234, num_groups=5):
+        super(BirdModel, self).__init__()
+
         # ⚠️ Kaggle 提交環境沒有網路，必須強制取消預訓練網路下載 (pretrained=False)
-        self.backbone = timm.create_model(
-            model_name,
-            pretrained=False,
-            in_chans=1
-        )
-        
+        self.backbone = timm.create_model(model_name, pretrained=False, in_chans=1)
         in_features = self.backbone.classifier.in_features
+
+        # 移除原本的 classifier，改成只輸出特徵（與訓練架構一致）
         self.backbone.classifier = nn.Identity()
-        self.fc_species = nn.Sequential(nn.Dropout(0.2), nn.Linear(in_features, num_classes))
-        self.fc_class   = nn.Sequential(nn.Dropout(0.2), nn.Linear(in_features, 5))  # 推論時不使用
+
+        # 主分類頭：物種
+        self.fc_species = nn.Sequential(
+            nn.Dropout(0.2),
+            nn.Linear(in_features, num_classes)
+        )
+
+        # 輔助分類頭：大類（權重需存在，推論時不使用）
+        self.fc_class = nn.Sequential(
+            nn.Dropout(0.2),
+            nn.Linear(in_features, num_groups)
+        )
 
     def forward(self, x):
-        return self.fc_species(self.backbone(x))
+        features = self.backbone(x)
+        return self.fc_species(features)
 # ==============================================================================
 
 def predict_for_audio(model_panns, model_cnn, file_path, device, class_columns, batch_size=32):
@@ -198,15 +207,15 @@ def main():
     except NameError:
         # 在 Kaggle Notebook 上，目前的目錄會是 /kaggle/working/
         base_dir = Path(os.getcwd())
-    kaggle_test_dir = Path('/kaggle/input/birdclef-2026/test_soundscapes')
+    kaggle_test_dir = Path('/kaggle/input/competitions/birdclef-2026/test_soundscapes')
     
     # 判斷運行環境與給定路徑
     if kaggle_test_dir.exists():
         test_dir = kaggle_test_dir
-        sample_sub_path = '/kaggle/input/birdclef-2026/sample_submission.csv'
+        sample_sub_path = '/kaggle/input/competitions/birdclef-2026/sample_submission.csv'
         # 在 Kaggle 上，您需要把模型權重當作 Data 掛載上來，路徑需依照您的 dataset 調整
-        panns_model_path = '/kaggle/input/models/poker555/test-2-panns/pytorch/v1/1/best_panns_model.pth' 
-        cnn_model_path = '/kaggle/input/models/poker555/birdclef2026-team-test1/pytorch/baseline/1/best_bird_model.pth' 
+        panns_model_path = '/kaggle/input/models/poker555/birdclef2026-team-test1/pytorch/v3/1/best_panns_model.pth' 
+        cnn_model_path = '/kaggle/input/models/poker555/birdclef2026-team-test1/pytorch/v3/1/best_bird_model.pth' 
         is_kaggle = True
         print("偵測到 Kaggle 運行環境！")
     else:

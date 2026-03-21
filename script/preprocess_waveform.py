@@ -1,8 +1,6 @@
 """
-PANNs 專用波形前處理腳本（含人聲靜音 + soft label）
+PANNs 專用波形前處理腳本（含人聲靜音 + soft label + 稀少物種離線增強）
 輸出：processed_data/train_waveforms.h5
-使用方式：
-    python script/preprocess_waveform.py
 """
 
 import ast
@@ -17,9 +15,17 @@ from tqdm import tqdm
 SAMPLE_RATE      = 32000
 NUM_CLASSES      = 234
 SECONDARY_WEIGHT = 0.3
+RARE_THRESHOLD   = 5
 VOICE_CSV        = Path("voice_detection_report.csv")
 OUTPUT_H5        = Path("processed_data/train_waveforms.h5")
 AUDIO_DIR        = Path("train_audio")
+
+AUG_CONFIGS = [
+    {'type': 'ts', 'rate': 0.9,  'suffix': '_ts09'},
+    {'type': 'ts', 'rate': 1.1,  'suffix': '_ts11'},
+    {'type': 'ps', 'steps': 1,   'suffix': '_ps+1'},
+    {'type': 'ps', 'steps': -1,  'suffix': '_ps-1'},
+]
 
 
 def build_label_map(tax_df: pd.DataFrame) -> dict:
@@ -73,75 +79,101 @@ def silence_voice_segments(waveform: np.ndarray, voice_segments: list, sr: int) 
     return y
 
 
+def augment_waveform(y: np.ndarray, aug: dict, sr: int) -> np.ndarray:
+    """
+    保守增強：time stretch ±10%、pitch shift ±1 半音。
+    trim/pad 回原始長度避免長度漂移。
+    """
+    import librosa
+    orig_len = len(y)
+    if aug['type'] == 'ts':
+        y_aug = librosa.effects.time_stretch(y, rate=aug['rate'])
+    else:
+        y_aug = librosa.effects.pitch_shift(y, sr=sr, n_steps=aug['steps'], n_fft=2048)
+    if len(y_aug) > orig_len:
+        y_aug = y_aug[:orig_len]
+    elif len(y_aug) < orig_len:
+        y_aug = np.pad(y_aug, (0, orig_len - len(y_aug)))
+    return y_aug.astype(np.float32)
+
+
 def process_single_audio(task: dict) -> dict:
     import librosa
     warnings.filterwarnings('ignore', category=UserWarning)
 
     filename   = task['filename']
     voice_segs = task.get('voice_segments', [])
+    aug        = task.get('aug', None)
     file_path  = AUDIO_DIR / filename
 
     try:
         y, _ = librosa.load(str(file_path), sr=SAMPLE_RATE, mono=True)
         if voice_segs:
             y = silence_voice_segments(y, voice_segs, SAMPLE_RATE)
-        return {
-            'status': 'success',
-            'filename': filename,
-            'waveform': y.astype(np.float32)
-        }
+        if aug is not None:
+            y = augment_waveform(y, aug, SAMPLE_RATE)
+        h5_key = filename + (aug['suffix'] if aug else '')
+        return {'status': 'success', 'h5_key': h5_key, 'waveform': y.astype(np.float32)}
     except Exception as e:
-        return {'status': 'failed', 'filename': filename, 'error_msg': str(e)}
+        h5_key = filename + (aug['suffix'] if aug else '')
+        return {'status': 'failed', 'h5_key': h5_key, 'error_msg': str(e)}
 
 
 def main():
     OUTPUT_H5.parent.mkdir(exist_ok=True)
 
     print("讀取資料表...")
-    df = pd.read_csv("train.csv")
+    df     = pd.read_csv("train.csv")
     tax_df = pd.read_csv("taxonomy_encoded.csv")
+    sc_df  = pd.read_csv("species_counts.csv")
     df = df.merge(tax_df[['primary_label', 'label_id', 'class_id']], on='primary_label', how='left')
 
-    label_map = build_label_map(tax_df)
+    label_map    = build_label_map(tax_df)
+    rare_species = set(sc_df[sc_df['audio_count'] <= RARE_THRESHOLD]['primary_label'].astype(str))
+    print(f"稀少物種（≤{RARE_THRESHOLD}筆）共 {len(rare_species)} 種，將進行離線增強。")
 
-    print("載入人聲過濾清單...")
     voice_map = load_voice_map(VOICE_CSV)
     print(f"共 {len(voice_map)} 支音訊含有人聲，將對其進行靜音處理。")
 
-    tasks = []
+    tasks    = []
     task_map = {}
+
     for _, row in df.iterrows():
-        key = '/'.join(str(row['filename']).replace('\\', '/').split('/')[-2:])
+        fname   = row['filename']
+        species = str(row['primary_label'])
+        key     = '/'.join(fname.replace('\\', '/').split('/')[-2:])
         soft_label = build_soft_label(
             int(row['label_id']), str(row['secondary_labels']), label_map, NUM_CLASSES
         )
-        fname = row['filename']
-        task_map[fname] = (soft_label, int(row['class_id']))
-        tasks.append({
-            'filename': fname,
-            'voice_segments': voice_map.get(key, [])
-        })
+        class_id   = int(row['class_id'])
+        voice_segs = voice_map.get(key, [])
 
+        task_map[fname] = (soft_label, class_id)
+        tasks.append({'filename': fname, 'voice_segments': voice_segs, 'aug': None})
+
+        if species in rare_species:
+            for aug in AUG_CONFIGS:
+                h5_key = fname + aug['suffix']
+                task_map[h5_key] = (soft_label, class_id)
+                tasks.append({'filename': fname, 'voice_segments': voice_segs, 'aug': aug})
+
+    print(f"共 {len(tasks)} 筆任務（含增強），開始多核心處理並寫入 {OUTPUT_H5}...")
     NUM_WORKERS = 4
-    BATCH_SIZE  = 16  # 每批只送 16 筆給 pool，處理完寫入後再送下一批
-
-    print(f"共 {len(tasks)} 筆音訊，開始多核心處理並寫入 {OUTPUT_H5}（workers={NUM_WORKERS}, batch={BATCH_SIZE}）...")
+    BATCH_SIZE  = 16
     success = failed = 0
 
     with h5py.File(OUTPUT_H5, 'w', rdcc_nbytes=0) as h5_file:
         h5_file.attrs['sample_rate'] = SAMPLE_RATE
         with Pool(processes=NUM_WORKERS, maxtasksperchild=50) as pool:
             with tqdm(total=len(tasks)) as pbar:
-                # 分批送工作：每次只讓 pool 處理 BATCH_SIZE 筆
-                # 等這批全部寫入磁碟後才送下一批，queue 不會堆積
                 for batch_start in range(0, len(tasks), BATCH_SIZE):
                     batch = tasks[batch_start: batch_start + BATCH_SIZE]
                     results = pool.map(process_single_audio, batch)
                     for result in results:
                         if result['status'] == 'success':
-                            soft_label, class_id = task_map[result['filename']]
+                            soft_label, class_id = task_map[result['h5_key']]
                             ds = h5_file.create_dataset(
-                                name=result['filename'],
+                                name=result['h5_key'],
                                 data=result['waveform'],
                                 compression='gzip', compression_opts=4
                             )
@@ -150,10 +182,9 @@ def main():
                             ds.attrs['sample_rate'] = SAMPLE_RATE
                             success += 1
                         else:
-                            print(f"\n[錯誤] {result['filename']} - {result['error_msg']}")
+                            print(f"\n[錯誤] {result['h5_key']} - {result['error_msg']}")
                             failed += 1
                         del result
-                    # 這批全部寫完後 flush 並釋放 results
                     h5_file.flush()
                     del results
                     pbar.update(len(batch))

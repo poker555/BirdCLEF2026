@@ -245,10 +245,19 @@ def main():
     model_cnn = BirdModel(num_classes=len(class_columns)).to(device)
     
     # 分別載入權重
-    for m, path, name in zip([model_panns, model_cnn], [panns_model_path, cnn_model_path], ['PANNs', 'CNN']):
+    # PANNs 用 strict=False：舊版權重沒有 fc_class，允許缺 key（推論時不使用 fc_class）
+    for m, path, name, strict in zip(
+        [model_panns, model_cnn],
+        [panns_model_path, cnn_model_path],
+        ['PANNs', 'CNN'],
+        [False, True]
+    ):
         try:
-            m.load_state_dict(torch.load(path, map_location=device))
-            print(f"成功載入 {name} 模型權重: {path}")
+            missing, unexpected = m.load_state_dict(torch.load(path, map_location=device), strict=strict)
+            if missing:
+                print(f"✅ 成功載入 {name} 模型權重（略過缺少的 key：{missing}）: {path}")
+            else:
+                print(f"✅ 成功載入 {name} 模型權重: {path}")
         except Exception as e:
             print(f"⚠️ 無法載入 {name} 權重 ({e})！將使用隨機初始化的權重進行測試。")
         

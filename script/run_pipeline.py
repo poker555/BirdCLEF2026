@@ -59,10 +59,10 @@ def run_test_mode(base: Path):
     test_dir.mkdir(exist_ok=True)
 
     # ── 步驟 1：產生測試用前處理腳本（inline，不修改原始腳本）──────────
-    test_preprocess_mel = base / 'script' / '_test_preprocess_mel.py'
-    test_preprocess_wav = base / 'script' / '_test_preprocess_wav.py'
-    test_train_cnn      = base / 'script' / '_test_train_cnn.py'
-    test_train_panns    = base / 'script' / '_test_train_panns.py'
+    test_preprocess_mel = base / '_test_preprocess_mel.py'
+    test_preprocess_wav = base / '_test_preprocess_wav.py'
+    test_train_cnn      = base / '_test_train_cnn.py'
+    test_train_panns    = base / '_test_train_panns.py'
 
     # 測試前處理：mel spectrogram（只取前 30 筆，輸出到 test_spectrograms.h5）
     test_preprocess_mel.write_text(textwrap.dedent("""
@@ -329,7 +329,7 @@ def run_test_mode(base: Path):
         print(f"{'─'*60}")
         result = subprocess.run(
             [sys.executable, script],
-            cwd=str(base)
+            cwd=str(base.parent)  # 專案根目錄
         )
         if result.returncode != 0:
             print(f"\n❌ {desc} 失敗！")

@@ -68,14 +68,17 @@ def run_test_mode(base: Path):
     test_preprocess_mel.write_text(textwrap.dedent("""
         import sys, os
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import preprocess as pp
-        import pandas as pd
 
-        pp.OUTPUT_H5 = pp.Path("processed_data/test_spectrograms.h5")
-        _orig_main = pp.main
+        if __name__ == '__main__':
+            import preprocess as pp
+            import pandas as pd
+            import h5py
+            from multiprocessing import Pool
+            from tqdm import tqdm
 
-        def patched_main():
+            pp.OUTPUT_H5 = pp.Path("processed_data/test_spectrograms.h5")
             pp.OUTPUT_H5.parent.mkdir(exist_ok=True)
+
             df     = pd.read_csv("train.csv").head(30)
             tax_df = pd.read_csv("taxonomy_encoded.csv")
             sc_df  = pd.read_csv("species_counts.csv")
@@ -89,7 +92,7 @@ def run_test_mode(base: Path):
             for _, row in df.iterrows():
                 fname   = row['filename']
                 species = str(row['primary_label'])
-                key     = '/'.join(fname.replace('\\\\','/')  .split('/')[-2:])
+                key     = '/'.join(fname.replace('\\\\', '/').split('/')[-2:])
                 soft_label = pp.build_soft_label(int(row['label_id']), str(row['secondary_labels']), label_map, pp.NUM_CLASSES)
                 class_id   = int(row['class_id'])
                 voice_segs = voice_map.get(key, [])
@@ -102,9 +105,6 @@ def run_test_mode(base: Path):
                         tasks.append({'filename': fname, 'voice_segments': voice_segs, 'aug': aug})
 
             print(f"[TEST] 共 {len(tasks)} 筆任務（含增強）")
-            import h5py
-            from multiprocessing import Pool
-            from tqdm import tqdm
             success = failed = 0
             with h5py.File(str(pp.OUTPUT_H5), 'w', rdcc_nbytes=0) as h5_file:
                 with Pool(processes=2, maxtasksperchild=20) as pool:
@@ -127,21 +127,23 @@ def run_test_mode(base: Path):
                             del results
                             pbar.update(len(batch))
             print(f"[TEST] Mel 前處理完成：成功 {success}，失敗 {failed}")
-
-        patched_main()
     """), encoding='utf-8')
 
     # 測試前處理：waveform（只取前 30 筆，輸出到 test_waveforms.h5）
     test_preprocess_wav.write_text(textwrap.dedent("""
         import sys, os
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import preprocess_waveform as pw
-        import pandas as pd
 
-        pw.OUTPUT_H5 = pw.Path("processed_data/test_waveforms.h5")
+        if __name__ == '__main__':
+            import preprocess_waveform as pw
+            import pandas as pd
+            import h5py
+            from multiprocessing import Pool
+            from tqdm import tqdm
 
-        def patched_main():
+            pw.OUTPUT_H5 = pw.Path("processed_data/test_waveforms.h5")
             pw.OUTPUT_H5.parent.mkdir(exist_ok=True)
+
             df     = pd.read_csv("train.csv").head(30)
             tax_df = pd.read_csv("taxonomy_encoded.csv")
             sc_df  = pd.read_csv("species_counts.csv")
@@ -168,9 +170,6 @@ def run_test_mode(base: Path):
                         tasks.append({'filename': fname, 'voice_segments': voice_segs, 'aug': aug})
 
             print(f"[TEST] 共 {len(tasks)} 筆任務（含增強）")
-            import h5py
-            from multiprocessing import Pool
-            from tqdm import tqdm
             success = failed = 0
             with h5py.File(str(pw.OUTPUT_H5), 'w', rdcc_nbytes=0) as h5_file:
                 h5_file.attrs['sample_rate'] = pw.SAMPLE_RATE
@@ -195,123 +194,127 @@ def run_test_mode(base: Path):
                             del results
                             pbar.update(len(batch))
             print(f"[TEST] Waveform 前處理完成：成功 {success}，失敗 {failed}")
-
-        patched_main()
     """), encoding='utf-8')
 
     # 測試訓練：CNN（2 epoch，batch_size=8，使用 test_spectrograms.h5）
     test_train_cnn.write_text(textwrap.dedent("""
         import sys, os
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import h5py, torch, torch.nn as nn, torch.optim as optim, numpy as np, pandas as pd
-        from pathlib import Path
-        from torch.utils.data import DataLoader, WeightedRandomSampler, ConcatDataset
-        from sklearn.metrics import f1_score
-        from cnn.dataset import BirdDataset
-        from cnn.model import BirdModel
-        from train import build_split, build_sampler
 
-        device   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        base_dir = Path(os.path.dirname(os.path.abspath(__file__))).parent
-        h5_path  = base_dir / 'processed_data/test_spectrograms.h5'
-        sc_df    = pd.read_csv(base_dir / 'species_counts.csv')
+        if __name__ == '__main__':
+            import h5py, torch, numpy as np, pandas as pd
+            import torch.nn as nn, torch.optim as optim
+            from pathlib import Path
+            from torch.utils.data import DataLoader, WeightedRandomSampler
+            from sklearn.metrics import f1_score
+            from cnn.dataset import BirdDataset
+            from cnn.model import BirdModel
+            from train import build_split, build_sampler
 
-        keys_train, keys_val = build_split(h5_path, sc_df)
-        print(f"[TEST CNN] 訓練 {len(keys_train)} 筆，驗證 {len(keys_val)} 筆")
+            device   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            base_dir = Path(os.path.dirname(os.path.abspath(__file__))).parent
+            h5_path  = base_dir / 'processed_data/test_spectrograms.h5'
+            sc_df    = pd.read_csv(base_dir / 'species_counts.csv')
 
-        train_ds = BirdDataset(h5_path, keys_train)
-        val_ds   = BirdDataset(h5_path, keys_val) if keys_val else train_ds
+            keys_train, keys_val = build_split(h5_path, sc_df)
+            print(f"[TEST CNN] 訓練 {len(keys_train)} 筆，驗證 {len(keys_val)} 筆")
 
-        key_weights = build_sampler(h5_path, keys_train, sc_df)
-        seg_weights = []
-        with h5py.File(str(h5_path), 'r') as f:
-            for key, w in zip(keys_train, key_weights):
-                try:    n_seg = max(1, f[key].shape[1] // 313)
-                except: n_seg = 1
-                seg_weights.extend([w] * n_seg)
+            train_ds = BirdDataset(h5_path, keys_train)
+            val_ds   = BirdDataset(h5_path, keys_val) if keys_val else train_ds
 
-        sampler      = WeightedRandomSampler(seg_weights, len(seg_weights), replacement=True)
-        train_loader = DataLoader(train_ds, batch_size=8, sampler=sampler, num_workers=0)
-        val_loader   = DataLoader(val_ds,   batch_size=8, shuffle=False,   num_workers=0)
+            key_weights = build_sampler(h5_path, keys_train, sc_df)
+            seg_weights = []
+            with h5py.File(str(h5_path), 'r') as f:
+                for key, w in zip(keys_train, key_weights):
+                    try:    n_seg = max(1, f[key].shape[1] // 313)
+                    except: n_seg = 1
+                    seg_weights.extend([w] * n_seg)
 
-        model     = BirdModel(num_classes=234).to(device)
-        criterion = nn.BCEWithLogitsLoss()
-        optimizer = optim.AdamW(model.parameters(), lr=1e-3)
+            sampler      = WeightedRandomSampler(seg_weights, len(seg_weights), replacement=True)
+            train_loader = DataLoader(train_ds, batch_size=8, sampler=sampler, num_workers=0)
+            val_loader   = DataLoader(val_ds,   batch_size=8, shuffle=False,   num_workers=0)
 
-        for epoch in range(2):
-            model.train()
-            for images, soft_labels, class_labels in train_loader:
-                images, soft_labels = images.to(device), soft_labels.to(device)
-                optimizer.zero_grad()
-                logits, _ = model(images)
-                loss = criterion(logits, soft_labels)
-                loss.backward()
-                optimizer.step()
-            print(f"[TEST CNN] Epoch {epoch+1}/2 完成，loss={loss.item():.4f}")
+            model     = BirdModel(num_classes=234).to(device)
+            criterion = nn.BCEWithLogitsLoss()
+            optimizer = optim.AdamW(model.parameters(), lr=1e-3)
 
-        model.eval()
-        preds, targets = [], []
-        with torch.no_grad():
-            for images, soft_labels, _ in val_loader:
-                out = model(images.to(device))
-                preds.extend(torch.max(out, 1)[1].cpu().numpy())
-                targets.extend(torch.max(soft_labels, 1)[1].numpy())
-        f1 = f1_score(targets, preds, average='macro', zero_division=0)
-        print(f"[TEST CNN] 驗證 F1={f1:.4f}  ✅ CNN 流程正常")
+            for epoch in range(2):
+                model.train()
+                for images, soft_labels, class_labels in train_loader:
+                    images, soft_labels = images.to(device), soft_labels.to(device)
+                    optimizer.zero_grad()
+                    logits, _ = model(images)
+                    loss = criterion(logits, soft_labels)
+                    loss.backward()
+                    optimizer.step()
+                print(f"[TEST CNN] Epoch {epoch+1}/2 完成，loss={loss.item():.4f}")
+
+            model.eval()
+            preds, targets = [], []
+            with torch.no_grad():
+                for images, soft_labels, _ in val_loader:
+                    out = model(images.to(device))
+                    preds.extend(torch.max(out, 1)[1].cpu().numpy())
+                    targets.extend(torch.max(soft_labels, 1)[1].numpy())
+            f1 = f1_score(targets, preds, average='macro', zero_division=0)
+            print(f"[TEST CNN] 驗證 F1={f1:.4f}  ✅ CNN 流程正常")
     """), encoding='utf-8')
 
     # 測試訓練：PANNs（2 epoch，batch_size=8，使用 test_waveforms.h5）
     test_train_panns.write_text(textwrap.dedent("""
         import sys, os
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import h5py, torch, torch.nn as nn, torch.optim as optim, numpy as np, pandas as pd
-        from pathlib import Path
-        from torch.utils.data import DataLoader, WeightedRandomSampler
-        from sklearn.metrics import f1_score
-        from panns.dataset import PANNsDataset
-        from panns.model import PANNsCNN10
-        from train_panns import build_split, build_sampler
 
-        device   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        base_dir = Path(os.path.dirname(os.path.abspath(__file__))).parent
-        h5_path  = base_dir / 'processed_data/test_waveforms.h5'
-        sc_df    = pd.read_csv(base_dir / 'species_counts.csv')
+        if __name__ == '__main__':
+            import h5py, torch, numpy as np, pandas as pd
+            import torch.nn as nn, torch.optim as optim
+            from pathlib import Path
+            from torch.utils.data import DataLoader, WeightedRandomSampler
+            from sklearn.metrics import f1_score
+            from panns.dataset import PANNsDataset
+            from panns.model import PANNsCNN10
+            from train_panns import build_split, build_sampler
 
-        keys_train, keys_val = build_split(h5_path, sc_df)
-        print(f"[TEST PANNs] 訓練 {len(keys_train)} 筆，驗證 {len(keys_val)} 筆")
+            device   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            base_dir = Path(os.path.dirname(os.path.abspath(__file__))).parent
+            h5_path  = base_dir / 'processed_data/test_waveforms.h5'
+            sc_df    = pd.read_csv(base_dir / 'species_counts.csv')
 
-        train_ds = PANNsDataset(str(h5_path), keys_train, chunk_length=160000)
-        val_ds   = PANNsDataset(str(h5_path), keys_val,   chunk_length=160000) if keys_val else train_ds
+            keys_train, keys_val = build_split(h5_path, sc_df)
+            print(f"[TEST PANNs] 訓練 {len(keys_train)} 筆，驗證 {len(keys_val)} 筆")
 
-        seg_weights = build_sampler(h5_path, keys_train, sc_df)
-        sampler      = WeightedRandomSampler(seg_weights, len(seg_weights), replacement=True)
-        train_loader = DataLoader(train_ds, batch_size=8, sampler=sampler, num_workers=0)
-        val_loader   = DataLoader(val_ds,   batch_size=8, shuffle=False,   num_workers=0)
+            train_ds = PANNsDataset(str(h5_path), keys_train, chunk_length=160000)
+            val_ds   = PANNsDataset(str(h5_path), keys_val,   chunk_length=160000) if keys_val else train_ds
 
-        model     = PANNsCNN10(classes_num=234).to(device)
-        criterion = nn.BCEWithLogitsLoss()
-        optimizer = optim.AdamW(model.parameters(), lr=1e-3)
+            seg_weights = build_sampler(h5_path, keys_train, sc_df)
+            sampler      = WeightedRandomSampler(seg_weights, len(seg_weights), replacement=True)
+            train_loader = DataLoader(train_ds, batch_size=8, sampler=sampler, num_workers=0)
+            val_loader   = DataLoader(val_ds,   batch_size=8, shuffle=False,   num_workers=0)
 
-        for epoch in range(2):
-            model.train()
-            for waveforms, soft_labels, class_labels in train_loader:
-                waveforms, soft_labels = waveforms.to(device), soft_labels.to(device)
-                optimizer.zero_grad()
-                logits, _ = model(waveforms)
-                loss = criterion(logits, soft_labels)
-                loss.backward()
-                optimizer.step()
-            print(f"[TEST PANNs] Epoch {epoch+1}/2 完成，loss={loss.item():.4f}")
+            model     = PANNsCNN10(classes_num=234).to(device)
+            criterion = nn.BCEWithLogitsLoss()
+            optimizer = optim.AdamW(model.parameters(), lr=1e-3)
 
-        model.eval()
-        preds, targets = [], []
-        with torch.no_grad():
-            for waveforms, soft_labels, _ in val_loader:
-                out = model(waveforms.to(device))
-                preds.extend(torch.max(out, 1)[1].cpu().numpy())
-                targets.extend(torch.max(soft_labels, 1)[1].numpy())
-        f1 = f1_score(targets, preds, average='macro', zero_division=0)
-        print(f"[TEST PANNs] 驗證 F1={f1:.4f}  ✅ PANNs 流程正常")
+            for epoch in range(2):
+                model.train()
+                for waveforms, soft_labels, class_labels in train_loader:
+                    waveforms, soft_labels = waveforms.to(device), soft_labels.to(device)
+                    optimizer.zero_grad()
+                    logits, _ = model(waveforms)
+                    loss = criterion(logits, soft_labels)
+                    loss.backward()
+                    optimizer.step()
+                print(f"[TEST PANNs] Epoch {epoch+1}/2 完成，loss={loss.item():.4f}")
+
+            model.eval()
+            preds, targets = [], []
+            with torch.no_grad():
+                for waveforms, soft_labels, _ in val_loader:
+                    out = model(waveforms.to(device))
+                    preds.extend(torch.max(out, 1)[1].cpu().numpy())
+                    targets.extend(torch.max(soft_labels, 1)[1].numpy())
+            f1 = f1_score(targets, preds, average='macro', zero_division=0)
+            print(f"[TEST PANNs] 驗證 F1={f1:.4f}  ✅ PANNs 流程正常")
     """), encoding='utf-8')
 
     # ── 執行四個測試步驟 ──────────────────────────────────────────────

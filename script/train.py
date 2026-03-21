@@ -78,22 +78,25 @@ def main():
         model.train()
         total_loss = 0.0
 
-        for batch_idx, (images, labels) in enumerate(train_loader):
+        for batch_idx, (images, labels, class_labels) in enumerate(train_loader):
 
-            images, labels = images.to(device), labels.to(device)
+            images, labels, class_labels = images.to(device), labels.to(device), class_labels.to(device)
 
             optimizer.zero_grad()
 
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                use_mixup = np.random.rand() >0.5
+                use_mixup = np.random.rand() > 0.5
 
                 if use_mixup:
                     mixded_images, targets_a, targets_b, lam = mixup_data(images, labels)
-                    outputs = model(mixded_images)
-                    loss = mixup_criterion(criterion, outputs, targets_a, targets_b, lam)
+                    logits_species, logits_class = model(mixded_images)
+                    loss_species = mixup_criterion(criterion, logits_species, targets_a, targets_b, lam)
                 else:
-                    outputs = model(images)
-                    loss = criterion(outputs, labels)
+                    logits_species, logits_class = model(images)
+                    loss_species = criterion(logits_species, labels)
+
+                loss_class = criterion(logits_class, class_labels)
+                loss = loss_species + 0.2 * loss_class
 
 
             
@@ -114,7 +117,7 @@ def main():
 
 
             if batch_idx % 10 == 0:
-                print(f"Epoch[{epoch+1}/{epoch}] | Batch[{batch_idx}/{len(train_loader)}] | 誤差 Loss: {loss.item(): .4f}")
+                print(f"Epoch[{epoch+1}/{epochs}] | Batch[{batch_idx}/{len(train_loader)}] | Loss: {loss.item():.4f} (species: {loss_species.item():.4f}, class: {loss_class.item():.4f})")
             
         avg_loss = total_loss / len(train_loader)
         print(f"Epoch{epoch+1}結束 | 平均 Loss: {avg_loss: .4f}\n")
@@ -124,11 +127,11 @@ def main():
         all_targets = []
 
         with torch.no_grad():
-            for images,labels in val_loader:
+            for images, labels, _ in val_loader:
                 images, labels = images.to(device), labels.to(device)
 
                 with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                    outputs = model(images)
+                    outputs = model(images)  # eval 模式只回傳 logits_species
                 
                 _,predicted = torch.max(outputs, 1)
 

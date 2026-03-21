@@ -29,7 +29,7 @@ class ConvBlock(nn.Module):
 
 # === CNN10 模型本體 ===
 class PANNsCNN10(nn.Module):
-    def __init__(self, sample_rate=32000, window_size=1024, hop_size=320, mel_bins=128, classes_num=234):
+    def __init__(self, sample_rate=32000, window_size=1024, hop_size=320, mel_bins=128, classes_num=234, num_groups=5):
         super(PANNsCNN10, self).__init__()
 
         # GPU 內建的超狂頻譜轉換器！直接掛在網路的最前端
@@ -53,9 +53,12 @@ class PANNsCNN10(nn.Module):
         # 最終層：全連接層輸出我們專案規定的 234 種鳥類
         self.fc1 = nn.Linear(512, 512, bias=True)
         self.fc_audioset = nn.Linear(512, classes_num, bias=True)
-        
+        # 輔助分類頭：大類（訓練用，推論時不使用）
+        self.fc_class = nn.Linear(512, num_groups, bias=True)
+
         init_layer(self.fc1)
         init_layer(self.fc_audioset)
+        init_layer(self.fc_class)
 
     def forward(self, input):
         # 1. 這裡的 input 是最原始的聲波 (Waveform)！例如 5 秒等於 160000 個採樣點
@@ -87,9 +90,12 @@ class PANNsCNN10(nn.Module):
         x = F.dropout(x, p=0.2, training=self.training)
         
         # 最終分數
-        clipwise_output = self.fc_audioset(x)
-        
-        return clipwise_output
+        logits_species = self.fc_audioset(x)
+
+        if self.training:
+            logits_class = self.fc_class(x)
+            return logits_species, logits_class
+        return logits_species
 
 if __name__ == '__main__':
     print("正在建構 CNN10 神經網路中...")

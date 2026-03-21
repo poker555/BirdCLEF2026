@@ -58,6 +58,7 @@ def process_single_audio(task: dict) -> dict:
 
     filename   = task['filename']
     label_id   = task['label_id']
+    class_id   = task['class_id']
     voice_segs = task.get('voice_segments', [])
     file_path  = AUDIO_DIR / filename
 
@@ -80,6 +81,7 @@ def process_single_audio(task: dict) -> dict:
             'status': 'success',
             'filename': filename,
             'label_id': label_id,
+            'class_id': class_id,
             'mel_db': mel_db
         }
 
@@ -93,7 +95,7 @@ def main():
     print("讀取資料表...")
     df = pd.read_csv("train.csv")
     tax_df = pd.read_csv("taxonomy_encoded.csv")
-    df = df.merge(tax_df[['primary_label', 'label_id']], on='primary_label', how='left')
+    df = df.merge(tax_df[['primary_label', 'label_id', 'class_id']], on='primary_label', how='left')
 
     print("載入人聲過濾清單...")
     voice_map = load_voice_map(VOICE_CSV)
@@ -105,6 +107,7 @@ def main():
         tasks.append({
             'filename': row['filename'],
             'label_id': row['label_id'],
+            'class_id': int(row['class_id']),
             'voice_segments': voice_map.get(key, [])
         })
 
@@ -124,6 +127,7 @@ def main():
                         compression='gzip'
                     )
                     ds.attrs['label_id'] = result['label_id']
+                    ds.attrs['class_id'] = result['class_id']
                     success += 1
                 else:
                     print(f"\n[錯誤] {result['filename']} - {result['error_msg']}")

@@ -61,8 +61,10 @@ class PANNsCNN10(nn.Module):
         self.conv_block4 = ConvBlock(in_channels=256, out_channels=512)
         self.fc1 = nn.Linear(512, 512, bias=True)
         self.fc_audioset = nn.Linear(512, classes_num, bias=True)
+        self.fc_class = nn.Linear(512, 5, bias=True)  # 輔助頭，推論時不使用
         init_layer(self.fc1)
         init_layer(self.fc_audioset)
+        init_layer(self.fc_class)
 
     def forward(self, input):
         x = self.mel_spectrogram(input)
@@ -97,13 +99,12 @@ class BirdModel(nn.Module):
         )
         
         in_features = self.backbone.classifier.in_features
-        self.backbone.classifier = nn.Sequential(
-            nn.Dropout(0.2),
-            nn.Linear(in_features, num_classes)
-        )
+        self.backbone.classifier = nn.Identity()
+        self.fc_species = nn.Sequential(nn.Dropout(0.2), nn.Linear(in_features, num_classes))
+        self.fc_class   = nn.Sequential(nn.Dropout(0.2), nn.Linear(in_features, 5))  # 推論時不使用
 
     def forward(self, x):
-        return self.backbone(x)
+        return self.fc_species(self.backbone(x))
 # ==============================================================================
 
 def predict_for_audio(model_panns, model_cnn, file_path, device, class_columns, batch_size=32):

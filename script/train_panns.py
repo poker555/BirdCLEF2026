@@ -91,22 +91,24 @@ def main():
         model.train()
         total_loss = 0.0
 
-        for batch_idx, (waveforms, labels) in enumerate(train_loader):
-            waveforms, labels = waveforms.to(device), labels.to(device)
+        for batch_idx, (waveforms, labels, class_labels) in enumerate(train_loader):
+            waveforms, labels, class_labels = waveforms.to(device), labels.to(device), class_labels.to(device)
 
             optimizer.zero_grad()
 
             use_mixup = np.random.rand() > 0.5
 
-            # 重新加入混合精度訓練！並指定使用 torch.bfloat16 來完美防禦對數轉換產生的 NaN 崩潰
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 if use_mixup:
                     mixed_waveforms, targets_a, targets_b, lam = mixup_data(waveforms, labels)
-                    outputs = model(mixed_waveforms)
-                    loss = mixup_criterion(criterion, outputs, targets_a, targets_b, lam)
+                    logits_species, logits_class = model(mixed_waveforms)
+                    loss_species = mixup_criterion(criterion, logits_species, targets_a, targets_b, lam)
                 else:
-                    outputs = model(waveforms)
-                    loss = criterion(outputs, labels)
+                    logits_species, logits_class = model(waveforms)
+                    loss_species = criterion(logits_species, labels)
+
+                loss_class = criterion(logits_class, class_labels)
+                loss = loss_species + 0.2 * loss_class
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -114,7 +116,7 @@ def main():
             total_loss += loss.item()
 
             if batch_idx % 10 == 0:
-                print(f"Epoch[{epoch+1}/{epochs}] | Batch[{batch_idx}/{len(train_loader)}] | 誤差 Loss: {loss.item():.4f}")
+                print(f"Epoch[{epoch+1}/{epochs}] | Batch[{batch_idx}/{len(train_loader)}] | Loss: {loss.item():.4f} (species: {loss_species.item():.4f}, class: {loss_class.item():.4f})")
             
         avg_loss = total_loss / len(train_loader)
         print(f"Epoch {epoch+1} 結束 | 平均 Loss: {avg_loss:.4f}\n")
@@ -124,11 +126,11 @@ def main():
         all_targets = []
 
         with torch.no_grad():
-            for waveforms, labels in val_loader:
+            for waveforms, labels, _ in val_loader:
                 waveforms, labels = waveforms.to(device), labels.to(device)
 
                 with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                    outputs = model(waveforms)
+                    outputs = model(waveforms)  # eval 模式只回傳 logits_species
                 
                 _, predicted = torch.max(outputs, 1)
 

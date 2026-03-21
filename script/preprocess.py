@@ -139,13 +139,18 @@ def main():
             'voice_segments': voice_map.get(key, [])
         })
 
-    print(f"共 {len(tasks)} 筆音訊，開始多核心處理並寫入 {OUTPUT_H5}...")
+    # worker 數量：保留足夠核心給系統，避免 OOM
+    NUM_WORKERS = 4
+
+    print(f"共 {len(tasks)} 筆音訊，開始多核心處理並寫入 {OUTPUT_H5}（workers={NUM_WORKERS}）...")
     success = failed = 0
 
     with h5py.File(OUTPUT_H5, 'w') as h5_file:
-        with Pool() as pool:
+        # maxtasksperchild=50：每個 worker 處理 50 筆後自動重啟，釋放 librosa 殘留記憶體
+        # chunksize=1：主 process 逐筆取結果，避免 queue 堆積大量頻譜資料
+        with Pool(processes=NUM_WORKERS, maxtasksperchild=50) as pool:
             for result in tqdm(
-                pool.imap_unordered(process_single_audio, tasks, chunksize=8),
+                pool.imap_unordered(process_single_audio, tasks, chunksize=1),
                 total=len(tasks)
             ):
                 if result['status'] == 'success':
@@ -161,6 +166,7 @@ def main():
                 else:
                     print(f"\n[錯誤] {result['filename']} - {result['error_msg']}")
                     failed += 1
+                del result
 
     print(f"\n完成！成功 {success} 筆，失敗 {failed} 筆。")
     print(f"HDF5 已儲存至：{OUTPUT_H5.resolve()}")

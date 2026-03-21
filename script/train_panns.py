@@ -43,13 +43,12 @@ def main():
     import h5py
     h5_path = base_dir / "processed_data" / "train_waveforms.h5"
 
-    # 從 HDF5 取得所有 key（格式：species/filename.ogg/chunk_N）
+    # 從 HDF5 取得所有 key（格式：species/filename.ogg，兩層結構）
     with h5py.File(h5_path, 'r') as f:
         all_keys = []
         for species in f.keys():
             for fname in f[species].keys():
-                for chunk in f[species][fname].keys():
-                    all_keys.append(f"{species}/{fname}/{chunk}")
+                all_keys.append(f"{species}/{fname}")
 
     try:
         # 取得每個 key 對應的 label_id 以便 stratify

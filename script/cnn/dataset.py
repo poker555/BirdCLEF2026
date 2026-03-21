@@ -31,8 +31,8 @@ class BirdDataset(Dataset):
 
         with h5py.File(self.h5_path, 'r') as f:
             ds = f[key]
-            label_id = ds.attrs['label_id']
-            class_id = ds.attrs['class_id']
+            soft_label = ds.attrs['soft_label'].astype(np.float32)  # (234,)
+            class_id   = ds.attrs['class_id']
 
             if total_frames <= self.chunk_length:
                 mel_matrix = ds[:]
@@ -47,7 +47,7 @@ class BirdDataset(Dataset):
 
         mel_matrix = np.expand_dims(mel_matrix, axis=0)
         return (torch.tensor(mel_matrix, dtype=torch.float32),
-                torch.tensor(label_id, dtype=torch.long),
+                torch.tensor(soft_label, dtype=torch.float32),
                 torch.tensor(class_id, dtype=torch.long))
 
 

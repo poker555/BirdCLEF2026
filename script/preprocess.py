@@ -1,3 +1,4 @@
+import ast
 import warnings
 import numpy as np
 import pandas as pd
@@ -7,20 +8,53 @@ from multiprocessing import Pool
 from tqdm import tqdm
 
 # ── 設定 ──────────────────────────────────────────────
-SAMPLE_RATE = 32000
-N_MELS      = 128
-N_FFT       = 2048
-HOP_LENGTH  = 512
-FMIN        = 150
-FMAX        = 16000
-VOICE_CSV   = Path("voice_detection_report.csv")
-OUTPUT_H5   = Path("processed_data/train_spectrograms.h5")
-AUDIO_DIR   = Path("train_audio")
+SAMPLE_RATE       = 32000
+N_MELS            = 128
+N_FFT             = 2048
+HOP_LENGTH        = 512
+FMIN              = 150
+FMAX              = 16000
+NUM_CLASSES       = 234
+SECONDARY_WEIGHT  = 0.3   # secondary label 的機率權重
+VOICE_CSV         = Path("voice_detection_report.csv")
+OUTPUT_H5         = Path("processed_data/train_spectrograms.h5")
+AUDIO_DIR         = Path("train_audio")
 # ──────────────────────────────────────────────────────
 
 
+def build_label_map(tax_df: pd.DataFrame) -> dict:
+    """建立 primary_label 字串 / inat_taxon_id 數字 -> label_id 的對應表"""
+    label_map = {}
+    for _, row in tax_df.iterrows():
+        label_map[str(row['primary_label'])]   = int(row['label_id'])
+        label_map[str(row['inat_taxon_id'])]   = int(row['label_id'])
+    return label_map
+
+
+def build_soft_label(primary_id: int, secondary_labels_str: str,
+                     label_map: dict, num_classes: int) -> np.ndarray:
+    """
+    建立 soft label 向量 (num_classes,)
+    primary   → 1.0
+    secondary → SECONDARY_WEIGHT（若有多個則各自獨立賦值）
+    其他       → 0.0
+    """
+    label = np.zeros(num_classes, dtype=np.float32)
+    label[primary_id] = 1.0
+
+    try:
+        secondaries = ast.literal_eval(secondary_labels_str)
+        for s in secondaries:
+            sid = label_map.get(str(s))
+            if sid is not None and sid != primary_id:
+                label[sid] = SECONDARY_WEIGHT
+    except Exception:
+        pass
+
+    return label
+
+
 def load_voice_map(csv_path: Path) -> dict:
-    """載入人聲時間段，回傳 { 'species/file.ogg': [(start_sec, end_sec), ...] }"""
     if not csv_path.exists():
         print(f"[警告] 找不到 {csv_path}，將不進行人聲過濾。")
         return {}
@@ -43,12 +77,9 @@ def load_voice_map(csv_path: Path) -> dict:
 
 
 def silence_voice_segments(waveform: np.ndarray, voice_segments: list, sr: int) -> np.ndarray:
-    """將波形中含人聲的時間段補零（靜音）"""
     y = waveform.copy()
     for start_sec, end_sec in voice_segments:
-        start_sample = int(start_sec * sr)
-        end_sample   = min(int(end_sec * sr), len(y))
-        y[start_sample:end_sample] = 0.0
+        y[int(start_sec * sr):min(int(end_sec * sr), len(y))] = 0.0
     return y
 
 
@@ -57,34 +88,29 @@ def process_single_audio(task: dict) -> dict:
     warnings.filterwarnings('ignore', category=UserWarning)
 
     filename   = task['filename']
-    label_id   = task['label_id']
+    soft_label = task['soft_label']   # np.ndarray (234,)
     class_id   = task['class_id']
     voice_segs = task.get('voice_segments', [])
     file_path  = AUDIO_DIR / filename
 
     try:
         y, _ = librosa.load(str(file_path), sr=SAMPLE_RATE, mono=True)
-
-        # 將人聲時間段靜音
         if voice_segs:
             y = silence_voice_segments(y, voice_segs, SAMPLE_RATE)
 
-        # 整支音訊轉 Mel-Spectrogram
         mel_spec = librosa.feature.melspectrogram(
             y=y, sr=SAMPLE_RATE, n_mels=N_MELS,
-            n_fft=N_FFT, hop_length=HOP_LENGTH,
-            fmin=FMIN, fmax=FMAX
+            n_fft=N_FFT, hop_length=HOP_LENGTH, fmin=FMIN, fmax=FMAX
         )
         mel_db = librosa.power_to_db(mel_spec, ref=np.max).astype(np.float32)
 
         return {
             'status': 'success',
             'filename': filename,
-            'label_id': label_id,
+            'soft_label': soft_label,
             'class_id': class_id,
             'mel_db': mel_db
         }
-
     except Exception as e:
         return {'status': 'failed', 'filename': filename, 'error_msg': str(e)}
 
@@ -97,6 +123,8 @@ def main():
     tax_df = pd.read_csv("taxonomy_encoded.csv")
     df = df.merge(tax_df[['primary_label', 'label_id', 'class_id']], on='primary_label', how='left')
 
+    label_map = build_label_map(tax_df)
+
     print("載入人聲過濾清單...")
     voice_map = load_voice_map(VOICE_CSV)
     print(f"共 {len(voice_map)} 支音訊含有人聲，將對其進行靜音處理。")
@@ -104,9 +132,12 @@ def main():
     tasks = []
     for _, row in df.iterrows():
         key = '/'.join(str(row['filename']).replace('\\', '/').split('/')[-2:])
+        soft_label = build_soft_label(
+            int(row['label_id']), str(row['secondary_labels']), label_map, NUM_CLASSES
+        )
         tasks.append({
             'filename': row['filename'],
-            'label_id': row['label_id'],
+            'soft_label': soft_label,
             'class_id': int(row['class_id']),
             'voice_segments': voice_map.get(key, [])
         })
@@ -126,8 +157,9 @@ def main():
                         data=result['mel_db'],
                         compression='gzip'
                     )
-                    ds.attrs['label_id'] = result['label_id']
-                    ds.attrs['class_id'] = result['class_id']
+                    # soft_label 存為 float32 陣列，class_id 存為整數
+                    ds.attrs['soft_label'] = result['soft_label']
+                    ds.attrs['class_id']   = result['class_id']
                     success += 1
                 else:
                     print(f"\n[錯誤] {result['filename']} - {result['error_msg']}")

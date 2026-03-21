@@ -17,18 +17,11 @@ from panns.dataset import PANNsDataset
 from panns.model import PANNsCNN10
 
 def mixup_data(x, y, alpha=0.4):
-    if alpha > 0:
-        lam = np.random.beta(alpha, alpha)
-    else:
-        lam = 1
-    batch_size = x.size()[0]
-    index = torch.randperm(batch_size).to(x.device)
-    mixed_x = lam * x + (1 - lam) * x[index, :]
-    y_a, y_b = y, y[index]
-    return mixed_x, y_a, y_b, lam
-
-def mixup_criterion(criterion, pred, y_a, y_b, lam):
-    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
+    """支援 soft label (float tensor) 的 mixup"""
+    lam = np.random.beta(alpha, alpha) if alpha > 0 else 1
+    index = torch.randperm(x.size(0)).to(x.device)
+    mixed_x = lam * x + (1 - lam) * x[index]
+    return mixed_x, y, y[index], lam
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -72,7 +65,8 @@ def main():
     # 建立 PANNs 模型 (我們的鳥類一共有 234 類)
     model = PANNsCNN10(classes_num=234).to(device)
 
-    criterion = nn.CrossEntropyLoss()
+    criterion_species = nn.BCEWithLogitsLoss()
+    criterion_class   = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=1e-3)
     
     # 加入動態學習率 (ReduceLROnPlateau)：如果 F1 Score 連續 2 次沒突破，就把學習率砍半 (factor=0.5)
@@ -91,8 +85,10 @@ def main():
         model.train()
         total_loss = 0.0
 
-        for batch_idx, (waveforms, labels, class_labels) in enumerate(train_loader):
-            waveforms, labels, class_labels = waveforms.to(device), labels.to(device), class_labels.to(device)
+        for batch_idx, (waveforms, soft_labels, class_labels) in enumerate(train_loader):
+            waveforms    = waveforms.to(device)
+            soft_labels  = soft_labels.to(device)
+            class_labels = class_labels.to(device)
 
             optimizer.zero_grad()
 
@@ -100,14 +96,15 @@ def main():
 
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 if use_mixup:
-                    mixed_waveforms, targets_a, targets_b, lam = mixup_data(waveforms, labels)
+                    mixed_waveforms, labels_a, labels_b, lam = mixup_data(waveforms, soft_labels)
                     logits_species, logits_class = model(mixed_waveforms)
-                    loss_species = mixup_criterion(criterion, logits_species, targets_a, targets_b, lam)
+                    mixed_soft = lam * labels_a + (1 - lam) * labels_b
+                    loss_species = criterion_species(logits_species, mixed_soft)
                 else:
                     logits_species, logits_class = model(waveforms)
-                    loss_species = criterion(logits_species, labels)
+                    loss_species = criterion_species(logits_species, soft_labels)
 
-                loss_class = criterion(logits_class, class_labels)
+                loss_class = criterion_class(logits_class, class_labels)
                 loss = loss_species + 0.2 * loss_class
 
             scaler.scale(loss).backward()
@@ -126,16 +123,18 @@ def main():
         all_targets = []
 
         with torch.no_grad():
-            for waveforms, labels, _ in val_loader:
-                waveforms, labels = waveforms.to(device), labels.to(device)
+            for waveforms, soft_labels, _ in val_loader:
+                waveforms   = waveforms.to(device)
+                soft_labels = soft_labels.to(device)
 
                 with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                    outputs = model(waveforms)  # eval 模式只回傳 logits_species
-                
-                _, predicted = torch.max(outputs, 1)
+                    outputs = model(waveforms)
+
+                _, predicted  = torch.max(outputs, 1)
+                _, true_labels = torch.max(soft_labels, 1)
 
                 all_preds.extend(predicted.cpu().numpy())
-                all_targets.extend(labels.cpu().numpy())
+                all_targets.extend(true_labels.cpu().numpy())
 
         # 計算 Macro F1 Score
         val_f1 = f1_score(all_targets, all_preds, average='macro')

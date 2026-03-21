@@ -15,22 +15,11 @@ from cnn.dataset import BirdDataset
 from cnn.model import BirdModel
 
 def mixup_data(x, y, alpha=0.4):
-    if alpha > 0:
-        lam = np.random.beta(alpha, alpha)
-    else:
-        lam = 1
-    
-    batch_size = x.size()[0]
-
-    index = torch.randperm(batch_size).to(x.device)
-
-    mixed_x = lam * x + (1 - lam) * x[index, :]
-
-    y_a, y_b = y, y[index]
-    return mixed_x, y_a, y_b, lam
-
-def mixup_criterion(criterion, pred, y_a, y_b, lam):
-    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
+    """支援 soft label (float tensor) 的 mixup"""
+    lam = np.random.beta(alpha, alpha) if alpha > 0 else 1
+    index = torch.randperm(x.size(0)).to(x.device)
+    mixed_x = lam * x + (1 - lam) * x[index]
+    return mixed_x, y, y[index], lam
     
 
 def main():
@@ -60,7 +49,8 @@ def main():
 
     model = BirdModel(num_classes=234).to(device)
 
-    criterion = nn.CrossEntropyLoss()
+    criterion_species = nn.BCEWithLogitsLoss()
+    criterion_class   = nn.CrossEntropyLoss()  # class_id 仍是單標籤
     optimizer = optim.AdamW(model.parameters(), lr=1e-3)
     
     # 動態學習率 (ReduceLROnPlateau)
@@ -78,9 +68,11 @@ def main():
         model.train()
         total_loss = 0.0
 
-        for batch_idx, (images, labels, class_labels) in enumerate(train_loader):
+        for batch_idx, (images, soft_labels, class_labels) in enumerate(train_loader):
 
-            images, labels, class_labels = images.to(device), labels.to(device), class_labels.to(device)
+            images      = images.to(device)
+            soft_labels = soft_labels.to(device)       # (B, 234) float
+            class_labels = class_labels.to(device)     # (B,) long
 
             optimizer.zero_grad()
 
@@ -88,14 +80,16 @@ def main():
                 use_mixup = np.random.rand() > 0.3
 
                 if use_mixup:
-                    mixded_images, targets_a, targets_b, lam = mixup_data(images, labels)
-                    logits_species, logits_class = model(mixded_images)
-                    loss_species = mixup_criterion(criterion, logits_species, targets_a, targets_b, lam)
+                    # soft label 可以直接線性混合
+                    mixed_images, labels_a, labels_b, lam = mixup_data(images, soft_labels)
+                    logits_species, logits_class = model(mixed_images)
+                    mixed_soft = lam * labels_a + (1 - lam) * labels_b
+                    loss_species = criterion_species(logits_species, mixed_soft)
                 else:
                     logits_species, logits_class = model(images)
-                    loss_species = criterion(logits_species, labels)
+                    loss_species = criterion_species(logits_species, soft_labels)
 
-                loss_class = criterion(logits_class, class_labels)
+                loss_class = criterion_class(logits_class, class_labels)
                 loss = loss_species + 0.2 * loss_class
 
 
@@ -127,16 +121,19 @@ def main():
         all_targets = []
 
         with torch.no_grad():
-            for images, labels, _ in val_loader:
-                images, labels = images.to(device), labels.to(device)
+            for images, soft_labels, _ in val_loader:
+                images = images.to(device)
+                soft_labels = soft_labels.to(device)
 
                 with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                     outputs = model(images)  # eval 模式只回傳 logits_species
-                
-                _,predicted = torch.max(outputs, 1)
+
+                _, predicted = torch.max(outputs, 1)
+                # 驗證用 primary label（soft_label 最大值的 index）
+                _, true_labels = torch.max(soft_labels, 1)
 
                 all_preds.extend(predicted.cpu().numpy())
-                all_targets.extend(labels.cpu().numpy())
+                all_targets.extend(true_labels.cpu().numpy())
 
         val_f1 = f1_score(all_targets, all_preds, average='macro')
         

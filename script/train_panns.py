@@ -40,23 +40,28 @@ def main():
     labels_csv = base_dir / "taxonomy_encoded.csv"
     audio_dir = base_dir / "train_audio"
     
-    df = pd.read_csv(train_csv)
-    tax_df = pd.read_csv(labels_csv)
-    df = df.merge(tax_df[['primary_label', 'label_id']], on='primary_label', how='left')
-    
-    # 切分訓練集與驗證集 (依照 label_id 分布)
-    # 注意如果有類別數量少於2的可能無法 stratify，這裡加上防呆機制或者您可以移除 stratify
+    import h5py
+    h5_path = base_dir / "processed_data" / "train_waveforms.h5"
+
+    # 從 HDF5 取得所有 key 並切分
+    with h5py.File(h5_path, 'r') as f:
+        all_keys = list(f.keys())
+
     try:
-        df_train, df_val = train_test_split(df, test_size=0.2, random_state=42, stratify=df['label_id'])
+        # 取得每個 key 對應的 label_id 以便 stratify
+        tax_df = pd.read_csv(labels_csv)
+        label_map = dict(zip(tax_df['primary_label'], tax_df['label_id']))
+        key_labels = [label_map.get(k.split('/')[0], 0) for k in all_keys]
+        keys_train, keys_val = train_test_split(all_keys, test_size=0.2, random_state=42, stratify=key_labels)
     except ValueError:
         print("警告: 資料分布極端無法 stratify，改為隨機切分。")
-        df_train, df_val = train_test_split(df, test_size=0.2, random_state=42)
+        keys_train, keys_val = train_test_split(all_keys, test_size=0.2, random_state=42)
 
-    print(f"分配完畢: 訓練集 {len(df_train)} 筆, 驗證集 {len(df_val)} 筆")
+    print(f"分配完畢: 訓練集 {len(keys_train)} 筆, 驗證集 {len(keys_val)} 筆")
 
     # 建立 Dataset 與 DataLoader
-    train_dataset = PANNsDataset(df_train, audio_dir=audio_dir, sample_rate=32000, max_length=5)
-    val_dataset = PANNsDataset(df_val, audio_dir=audio_dir, sample_rate=32000, max_length=5)
+    train_dataset = PANNsDataset(str(h5_path), keys_train, sample_rate=32000, chunk_sec=5)
+    val_dataset = PANNsDataset(str(h5_path), keys_val, sample_rate=32000, chunk_sec=5)
 
     # 啟動多核心並行載入資料 (num_workers=8)，並裝滿 VRAM 以吃滿 GPU
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=8, pin_memory=True)
@@ -72,7 +77,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
     scaler = torch.amp.GradScaler('cuda')
 
-    epochs = 30
+    epochs = 100
     print("開始 PANNs 模型訓練")
 
     # Early Stopping 設定：當 F1 連續 5 次沒突破，提早停止訓練

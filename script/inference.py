@@ -204,16 +204,16 @@ def main():
         test_dir = kaggle_test_dir
         sample_sub_path = '/kaggle/input/birdclef-2026/sample_submission.csv'
         # 在 Kaggle 上，您需要把模型權重當作 Data 掛載上來，路徑需依照您的 dataset 調整
-        panns_model_path = '/kaggle/input/birdclef-models/best_panns_model.pth' 
-        cnn_model_path = '/kaggle/input/birdclef-models/best_bird_model.pth' 
+        panns_model_path = '/kaggle/input/models/poker555/test-2-panns/pytorch/v1/1/best_panns_model.pth' 
+        cnn_model_path = '/kaggle/input/models/poker555/birdclef2026-team-test1/pytorch/baseline/1/best_bird_model.pth' 
         is_kaggle = True
         print("偵測到 Kaggle 運行環境！")
     else:
         # 本地端測試路徑 (依據要求使用 train_audio)
         test_dir = base_dir / 'train_audio'
         sample_sub_path = base_dir / 'sample_submission.csv'
-        panns_model_path = base_dir / 'models' / 'best_panns_model.pth'
-        cnn_model_path = base_dir / 'models' / 'best_bird_model.pth'
+        panns_model_path = base_dir / 'best_panns_model.pth'
+        cnn_model_path = base_dir / 'best_bird_model.pth'
         is_kaggle = False
         print("偵測到本地測試環境！")
         

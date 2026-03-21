@@ -122,38 +122,41 @@ def main():
             'voice_segments': voice_map.get(key, [])
         })
 
-    # worker 數量：保留足夠核心給系統，避免 OOM
-    NUM_WORKERS = 2
+    NUM_WORKERS = 4
+    BATCH_SIZE  = 16  # 每批只送 16 筆給 pool，處理完寫入後再送下一批
 
-    print(f"共 {len(tasks)} 筆音訊，開始多核心處理並寫入 {OUTPUT_H5}（workers={NUM_WORKERS}）...")
+    print(f"共 {len(tasks)} 筆音訊，開始多核心處理並寫入 {OUTPUT_H5}（workers={NUM_WORKERS}, batch={BATCH_SIZE}）...")
     success = failed = 0
 
-    with h5py.File(OUTPUT_H5, 'w') as h5_file:
+    with h5py.File(OUTPUT_H5, 'w', rdcc_nbytes=0) as h5_file:
         h5_file.attrs['sample_rate'] = SAMPLE_RATE
-        # maxtasksperchild=50：每個 worker 處理 50 筆後自動重啟，釋放 librosa 殘留記憶體
-        # chunksize=1：主 process 逐筆取結果，避免 queue 堆積大量波形資料
         with Pool(processes=NUM_WORKERS, maxtasksperchild=50) as pool:
-            for result in tqdm(
-                pool.imap_unordered(process_single_audio, tasks, chunksize=1),
-                total=len(tasks)
-            ):
-                if result['status'] == 'success':
-                    soft_label, class_id = task_map[result['filename']]
-                    ds = h5_file.create_dataset(
-                        name=result['filename'],
-                        data=result['waveform'],
-                        compression='gzip', compression_opts=4
-                    )
-                    ds.attrs['soft_label']  = soft_label
-                    ds.attrs['class_id']    = class_id
-                    ds.attrs['sample_rate'] = SAMPLE_RATE
-                    success += 1
-                    # 強制將 HDF5 快取刷入磁碟，避免資料堆積在記憶體
+            with tqdm(total=len(tasks)) as pbar:
+                # 分批送工作：每次只讓 pool 處理 BATCH_SIZE 筆
+                # 等這批全部寫入磁碟後才送下一批，queue 不會堆積
+                for batch_start in range(0, len(tasks), BATCH_SIZE):
+                    batch = tasks[batch_start: batch_start + BATCH_SIZE]
+                    results = pool.map(process_single_audio, batch)
+                    for result in results:
+                        if result['status'] == 'success':
+                            soft_label, class_id = task_map[result['filename']]
+                            ds = h5_file.create_dataset(
+                                name=result['filename'],
+                                data=result['waveform'],
+                                compression='gzip', compression_opts=4
+                            )
+                            ds.attrs['soft_label']  = soft_label
+                            ds.attrs['class_id']    = class_id
+                            ds.attrs['sample_rate'] = SAMPLE_RATE
+                            success += 1
+                        else:
+                            print(f"\n[錯誤] {result['filename']} - {result['error_msg']}")
+                            failed += 1
+                        del result
+                    # 這批全部寫完後 flush 並釋放 results
                     h5_file.flush()
-                else:
-                    print(f"\n[錯誤] {result['filename']} - {result['error_msg']}")
-                    failed += 1
-                del result
+                    del results
+                    pbar.update(len(batch))
 
     print(f"\n完成！成功 {success} 筆，失敗 {failed} 筆。")
     print(f"HDF5 已儲存至：{OUTPUT_H5.resolve()}")

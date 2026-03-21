@@ -368,6 +368,52 @@ def run(script_path: str, desc: str):
     print(f"\n[完成] {desc}")
 
 
+def log_experiment(base: Path):
+    """
+    讀取訓練腳本輸出的 JSON 結果，追加一筆紀錄到 experiment_log.csv。
+    每次執行 pipeline 產生一個 run_id（時間戳），CNN 和 PANNs 各一列。
+    """
+    import json
+    import csv
+    from datetime import datetime
+
+    log_path = base.parent / 'experiment_log.csv'
+    run_id   = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    fieldnames = [
+        'run_id', 'model', 'best_f1', 'epochs_trained',
+        'rare_threshold', 'augmentation', 'sampler',
+        'mixup_alpha', 'mixup_prob', 'soft_label_weight',
+        'val_strategy', 'aux_loss_weight', 'notes',
+    ]
+
+    rows = []
+    for model_name in ['cnn', 'panns']:
+        json_path = base.parent / 'models' / f'{model_name}_train_result.json'
+        if not json_path.exists():
+            print(f"[LOG] 找不到 {json_path}，跳過此模型紀錄。")
+            continue
+        with open(json_path, encoding='utf-8') as f:
+            data = json.load(f)
+        data['run_id'] = run_id
+        rows.append({k: data.get(k, '') for k in fieldnames})
+
+    if not rows:
+        print("[LOG] 沒有可寫入的訓練結果。")
+        return
+
+    write_header = not log_path.exists()
+    with open(log_path, 'a', newline='', encoding='utf-8-sig') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"\n[LOG] 實驗紀錄已追加至 {log_path}（run_id: {run_id}）")
+    for r in rows:
+        print(f"      {r['model']:6s} | best_f1={r['best_f1']} | epochs={r['epochs_trained']}")
+
+
 def main():
     parser = argparse.ArgumentParser(description='BirdCLEF 2026 完整訓練流程')
     parser.add_argument('--skip-preprocess', action='store_true',
@@ -406,6 +452,8 @@ def main():
             print("已跳過前處理步驟。")
         run(*steps['cnn'])
         run(*steps['panns'])
+        # 訓練完成後寫入實驗紀錄
+        log_experiment(base)
 
     print("\n" + "="*60)
     print("  全部流程完成！")

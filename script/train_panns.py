@@ -194,6 +194,26 @@ def main():
                 print("==> Early Stopping")
                 break
 
+    # 訓練結果寫入 JSON，供 run_pipeline.py 讀取後追加到 experiment_log.csv
+    import json
+    result = {
+        'model':              'panns',
+        'best_f1':            round(best_f1, 6),
+        'epochs_trained':     epoch + 1,
+        'rare_threshold':     5,
+        'augmentation':       'time_stretch_0.9/1.1, pitch_shift_+/-1',
+        'sampler':            'WeightedRandomSampler(1/species_count)',
+        'mixup_alpha':        0.4,
+        'mixup_prob':         0.7,
+        'soft_label_weight':  0.3,
+        'val_strategy':       'rare_all_train + stratified_80_20 + soundscape',
+        'aux_loss_weight':    0.2,
+        'notes':              '',
+    }
+    out_path = base_dir / 'models' / 'panns_train_result.json'
+    with open(out_path, 'w', encoding='utf-8') as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+    print(f"訓練結果已寫入 {out_path}")
     print("PANNs 訓練完成")
 
 

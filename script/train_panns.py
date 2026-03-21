@@ -43,16 +43,19 @@ def main():
     import h5py
     h5_path = base_dir / "processed_data" / "train_waveforms.h5"
 
-    # 從 HDF5 取得所有 key 並切分
+    # 從 HDF5 取得所有 key（格式：species/filename.ogg/chunk_N）
     with h5py.File(h5_path, 'r') as f:
-        all_keys = list(f.keys())
+        all_keys = []
+        for species in f.keys():
+            for fname in f[species].keys():
+                for chunk in f[species][fname].keys():
+                    all_keys.append(f"{species}/{fname}/{chunk}")
 
     try:
         # 取得每個 key 對應的 label_id 以便 stratify
         tax_df = pd.read_csv(labels_csv)
         label_map = dict(zip(tax_df['primary_label'], tax_df['label_id']))
-        key_labels = [label_map.get(k.split('/')[0], 0) for k in all_keys]
-        keys_train, keys_val = train_test_split(all_keys, test_size=0.2, random_state=42, stratify=key_labels)
+        key_labels = [label_map.get(k.split('/')[0], 0) for k in all_keys]        keys_train, keys_val = train_test_split(all_keys, test_size=0.2, random_state=42, stratify=key_labels)
     except ValueError:
         print("警告: 資料分布極端無法 stratify，改為隨機切分。")
         keys_train, keys_val = train_test_split(all_keys, test_size=0.2, random_state=42)

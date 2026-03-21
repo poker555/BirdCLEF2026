@@ -40,9 +40,11 @@ def main():
     h5_path = base_dir / 'processed_data/train_spectrograms.h5'
     keys = []
     with h5py.File(str(h5_path), 'r') as f:
-        for group in f.keys():
-            for dset in f[group].keys():
-                keys.append(f"{group}/{dset}")
+        # key 格式：species/filename.ogg/chunk_N（三層結構）
+        for species in f.keys():
+            for fname in f[species].keys():
+                for chunk in f[species][fname].keys():
+                    keys.append(f"{species}/{fname}/{chunk}")
     
     keys_train, keys_val = train_test_split(keys, test_size=0.2, random_state=42)
     print(f"分配完畢:訓練集{len(keys_train)}筆,驗證集{len(keys_val)}筆")

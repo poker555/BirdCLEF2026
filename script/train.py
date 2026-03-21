@@ -14,7 +14,7 @@ import h5py
 from cnn.dataset import BirdDataset
 from cnn.model import BirdModel
 
-def mixup_data(x, y, alpha=0.2):
+def mixup_data(x, y, alpha=0.4):
     if alpha > 0:
         lam = np.random.beta(alpha, alpha)
     else:
@@ -85,7 +85,7 @@ def main():
             optimizer.zero_grad()
 
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                use_mixup = np.random.rand() > 0.5
+                use_mixup = np.random.rand() > 0.3
 
                 if use_mixup:
                     mixded_images, targets_a, targets_b, lam = mixup_data(images, labels)

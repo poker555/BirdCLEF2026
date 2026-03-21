@@ -16,7 +16,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from panns.dataset import PANNsDataset
 from panns.model import PANNsCNN10
 
-def mixup_data(x, y, alpha=0.2):
+def mixup_data(x, y, alpha=0.4):
     if alpha > 0:
         lam = np.random.beta(alpha, alpha)
     else:
@@ -96,7 +96,7 @@ def main():
 
             optimizer.zero_grad()
 
-            use_mixup = np.random.rand() > 0.5
+            use_mixup = np.random.rand() > 0.3
 
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 if use_mixup:

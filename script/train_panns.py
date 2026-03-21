@@ -47,7 +47,8 @@ def main():
         # 取得每個 key 對應的 label_id 以便 stratify
         tax_df = pd.read_csv(labels_csv)
         label_map = dict(zip(tax_df['primary_label'], tax_df['label_id']))
-        key_labels = [label_map.get(k.split('/')[0], 0) for k in all_keys]        keys_train, keys_val = train_test_split(all_keys, test_size=0.2, random_state=42, stratify=key_labels)
+        key_labels = [label_map.get(k.split('/')[0], 0) for k in all_keys]
+        keys_train, keys_val = train_test_split(all_keys, test_size=0.2, random_state=42, stratify=key_labels)
     except ValueError:
         print("警告: 資料分布極端無法 stratify，改為隨機切分。")
         keys_train, keys_val = train_test_split(all_keys, test_size=0.2, random_state=42)

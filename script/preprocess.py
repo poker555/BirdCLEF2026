@@ -163,6 +163,8 @@ def main():
                     ds.attrs['soft_label'] = soft_label
                     ds.attrs['class_id']   = class_id
                     success += 1
+                    # 強制將 HDF5 快取刷入磁碟，避免資料堆積在記憶體
+                    h5_file.flush()
                 else:
                     print(f"\n[錯誤] {result['filename']} - {result['error_msg']}")
                     failed += 1

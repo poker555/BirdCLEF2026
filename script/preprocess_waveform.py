@@ -123,7 +123,7 @@ def main():
         })
 
     # worker 數量：保留足夠核心給系統，避免 OOM
-    NUM_WORKERS = 4
+    NUM_WORKERS = 2
 
     print(f"共 {len(tasks)} 筆音訊，開始多核心處理並寫入 {OUTPUT_H5}（workers={NUM_WORKERS}）...")
     success = failed = 0
@@ -148,10 +148,11 @@ def main():
                     ds.attrs['class_id']    = class_id
                     ds.attrs['sample_rate'] = SAMPLE_RATE
                     success += 1
+                    # 強制將 HDF5 快取刷入磁碟，避免資料堆積在記憶體
+                    h5_file.flush()
                 else:
                     print(f"\n[錯誤] {result['filename']} - {result['error_msg']}")
                     failed += 1
-                # 主 process 每筆處理完後主動釋放 result 物件
                 del result
 
     print(f"\n完成！成功 {success} 筆，失敗 {failed} 筆。")

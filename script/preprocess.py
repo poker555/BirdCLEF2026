@@ -88,8 +88,6 @@ def process_single_audio(task: dict) -> dict:
     warnings.filterwarnings('ignore', category=UserWarning)
 
     filename   = task['filename']
-    soft_label = task['soft_label']   # np.ndarray (234,)
-    class_id   = task['class_id']
     voice_segs = task.get('voice_segments', [])
     file_path  = AUDIO_DIR / filename
 
@@ -107,8 +105,6 @@ def process_single_audio(task: dict) -> dict:
         return {
             'status': 'success',
             'filename': filename,
-            'soft_label': soft_label,
-            'class_id': class_id,
             'mel_db': mel_db
         }
     except Exception as e:
@@ -130,15 +126,16 @@ def main():
     print(f"共 {len(voice_map)} 支音訊含有人聲，將對其進行靜音處理。")
 
     tasks = []
+    task_map = {}
     for _, row in df.iterrows():
         key = '/'.join(str(row['filename']).replace('\\', '/').split('/')[-2:])
         soft_label = build_soft_label(
             int(row['label_id']), str(row['secondary_labels']), label_map, NUM_CLASSES
         )
+        fname = row['filename']
+        task_map[fname] = (soft_label, int(row['class_id']))
         tasks.append({
-            'filename': row['filename'],
-            'soft_label': soft_label,
-            'class_id': int(row['class_id']),
+            'filename': fname,
             'voice_segments': voice_map.get(key, [])
         })
 
@@ -152,14 +149,14 @@ def main():
                 total=len(tasks)
             ):
                 if result['status'] == 'success':
+                    soft_label, class_id = task_map[result['filename']]
                     ds = h5_file.create_dataset(
                         name=result['filename'],
                         data=result['mel_db'],
                         compression='gzip'
                     )
-                    # soft_label 存為 float32 陣列，class_id 存為整數
-                    ds.attrs['soft_label'] = result['soft_label']
-                    ds.attrs['class_id']   = result['class_id']
+                    ds.attrs['soft_label'] = soft_label
+                    ds.attrs['class_id']   = class_id
                     success += 1
                 else:
                     print(f"\n[錯誤] {result['filename']} - {result['error_msg']}")

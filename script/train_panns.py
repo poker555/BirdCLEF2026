@@ -56,8 +56,8 @@ def main():
     print(f"分配完畢: 訓練集 {len(keys_train)} 筆, 驗證集 {len(keys_val)} 筆")
 
     # 建立 Dataset 與 DataLoader
-    train_dataset = PANNsDataset(str(h5_path), keys_train, sample_rate=32000, chunk_sec=5)
-    val_dataset = PANNsDataset(str(h5_path), keys_val, sample_rate=32000, chunk_sec=5)
+    train_dataset = PANNsDataset(str(h5_path), keys_train, chunk_length=160000)
+    val_dataset = PANNsDataset(str(h5_path), keys_val, chunk_length=160000)
 
     # 啟動多核心並行載入資料 (num_workers=8)，並裝滿 VRAM 以吃滿 GPU
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=8, pin_memory=True)

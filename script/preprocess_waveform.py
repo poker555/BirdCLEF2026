@@ -1,93 +1,153 @@
 """
-PANNs 專用波形前處理腳本
-將原始 .ogg 音訊重新取樣至 32kHz 並儲存原始波形至 HDF5
+PANNs 專用波形前處理腳本（含人聲靜音 + soft label）
 輸出：processed_data/train_waveforms.h5
 使用方式：
     python script/preprocess_waveform.py
 """
 
+import ast
 import warnings
 import numpy as np
 import pandas as pd
 import h5py
-import os
 from pathlib import Path
 from multiprocessing import Pool
 from tqdm import tqdm
 
-# ── 設定 ──────────────────────────────────────────────
-SAMPLE_RATE = 32000
-OUTPUT_H5   = Path("processed_data/train_waveforms.h5")
-TRAIN_CSV   = Path("train.csv")
-TAXONOMY_CSV = Path("taxonomy_encoded.csv")
-AUDIO_DIR   = Path("train_audio")
-# ──────────────────────────────────────────────────────
+SAMPLE_RATE      = 32000
+NUM_CLASSES      = 234
+SECONDARY_WEIGHT = 0.3
+VOICE_CSV        = Path("voice_detection_report.csv")
+OUTPUT_H5        = Path("processed_data/train_waveforms.h5")
+AUDIO_DIR        = Path("train_audio")
+
+
+def build_label_map(tax_df: pd.DataFrame) -> dict:
+    label_map = {}
+    for _, row in tax_df.iterrows():
+        label_map[str(row['primary_label'])] = int(row['label_id'])
+        label_map[str(row['inat_taxon_id'])] = int(row['label_id'])
+    return label_map
+
+
+def build_soft_label(primary_id: int, secondary_labels_str: str,
+                     label_map: dict, num_classes: int) -> np.ndarray:
+    label = np.zeros(num_classes, dtype=np.float32)
+    label[primary_id] = 1.0
+    try:
+        for s in ast.literal_eval(secondary_labels_str):
+            sid = label_map.get(str(s))
+            if sid is not None and sid != primary_id:
+                label[sid] = SECONDARY_WEIGHT
+    except Exception:
+        pass
+    return label
+
+
+def load_voice_map(csv_path: Path) -> dict:
+    if not csv_path.exists():
+        print(f"[警告] 找不到 {csv_path}，將不進行人聲過濾。")
+        return {}
+    df = pd.read_csv(csv_path, encoding='utf-8-sig')
+    df = df[df['has_voice'] == True]
+    voice_map = {}
+    for _, row in df.iterrows():
+        key = '/'.join(str(row['filename']).replace('\\', '/').split('/')[-2:])
+        segments = []
+        if pd.notna(row['segments_detail']) and str(row['segments_detail']).strip():
+            for seg in str(row['segments_detail']).split('|'):
+                parts = seg.strip().split('-')
+                if len(parts) == 2:
+                    try:
+                        segments.append((float(parts[0]), float(parts[1])))
+                    except ValueError:
+                        continue
+        voice_map[key] = segments
+    return voice_map
+
+
+def silence_voice_segments(waveform: np.ndarray, voice_segments: list, sr: int) -> np.ndarray:
+    y = waveform.copy()
+    for start_sec, end_sec in voice_segments:
+        y[int(start_sec * sr):min(int(end_sec * sr), len(y))] = 0.0
+    return y
 
 
 def process_single_audio(task: dict) -> dict:
-    """載入單一音訊並回傳原始波形，在 worker process 中執行"""
-    import librosa  # 在 worker 內 import 避免 multiprocessing 問題
-
+    import librosa
     warnings.filterwarnings('ignore', category=UserWarning)
 
-    filename = task['filename']
-    label_id = task['label_id']
-    file_path = AUDIO_DIR / filename
+    filename   = task['filename']
+    voice_segs = task.get('voice_segments', [])
+    file_path  = AUDIO_DIR / filename
 
     try:
-        waveform, _ = librosa.load(str(file_path), sr=SAMPLE_RATE, mono=True)
+        y, _ = librosa.load(str(file_path), sr=SAMPLE_RATE, mono=True)
+        if voice_segs:
+            y = silence_voice_segments(y, voice_segs, SAMPLE_RATE)
         return {
             'status': 'success',
             'filename': filename,
-            'label_id': label_id,
-            'waveform': waveform.astype(np.float32)
+            'waveform': y.astype(np.float32)
         }
     except Exception as e:
-        return {
-            'status': 'failed',
-            'filename': filename,
-            'error_msg': str(e)
-        }
+        return {'status': 'failed', 'filename': filename, 'error_msg': str(e)}
 
 
 def main():
     OUTPUT_H5.parent.mkdir(exist_ok=True)
 
     print("讀取資料表...")
-    df = pd.read_csv(TRAIN_CSV)
-    tax_df = pd.read_csv(TAXONOMY_CSV)
-    df = df.merge(tax_df[['primary_label', 'label_id']], on='primary_label', how='left')
+    df = pd.read_csv("train.csv")
+    tax_df = pd.read_csv("taxonomy_encoded.csv")
+    df = df.merge(tax_df[['primary_label', 'label_id', 'class_id']], on='primary_label', how='left')
 
-    tasks = df[['filename', 'label_id']].to_dict('records')
+    label_map = build_label_map(tax_df)
+
+    print("載入人聲過濾清單...")
+    voice_map = load_voice_map(VOICE_CSV)
+    print(f"共 {len(voice_map)} 支音訊含有人聲，將對其進行靜音處理。")
+
+    tasks = []
+    task_map = {}
+    for _, row in df.iterrows():
+        key = '/'.join(str(row['filename']).replace('\\', '/').split('/')[-2:])
+        soft_label = build_soft_label(
+            int(row['label_id']), str(row['secondary_labels']), label_map, NUM_CLASSES
+        )
+        fname = row['filename']
+        task_map[fname] = (soft_label, int(row['class_id']))
+        tasks.append({
+            'filename': fname,
+            'voice_segments': voice_map.get(key, [])
+        })
+
     print(f"共 {len(tasks)} 筆音訊，開始多核心處理並寫入 {OUTPUT_H5}...")
-
-    success_count = 0
-    fail_count = 0
+    success = failed = 0
 
     with h5py.File(OUTPUT_H5, 'w') as h5_file:
-        # 儲存取樣率供後續讀取時參考
         h5_file.attrs['sample_rate'] = SAMPLE_RATE
-
         with Pool() as pool:
             for result in tqdm(
                 pool.imap_unordered(process_single_audio, tasks, chunksize=8),
                 total=len(tasks)
             ):
                 if result['status'] == 'success':
+                    soft_label, class_id = task_map[result['filename']]
                     ds = h5_file.create_dataset(
                         name=result['filename'],
                         data=result['waveform'],
-                        compression='gzip',
-                        compression_opts=4  # 波形資料量大，用適中壓縮率平衡速度與空間
+                        compression='gzip', compression_opts=4
                     )
-                    ds.attrs['label_id'] = result['label_id']
+                    ds.attrs['soft_label']  = soft_label
+                    ds.attrs['class_id']    = class_id
                     ds.attrs['sample_rate'] = SAMPLE_RATE
-                    success_count += 1
+                    success += 1
                 else:
                     print(f"\n[錯誤] {result['filename']} - {result['error_msg']}")
-                    fail_count += 1
+                    failed += 1
 
-    print(f"\n完成！成功 {success_count} 筆，失敗 {fail_count} 筆。")
+    print(f"\n完成！成功 {success} 筆，失敗 {failed} 筆。")
     print(f"HDF5 已儲存至：{OUTPUT_H5.resolve()}")
 
 

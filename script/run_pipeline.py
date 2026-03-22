@@ -381,7 +381,7 @@ def log_experiment(base: Path):
     run_id   = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     fieldnames = [
-        'run_id', 'model', 'best_f1', 'epochs_trained',
+        'run_id', 'model', 'best_f1', 'best_map', 'epochs_trained',
         'rare_threshold', 'augmentation', 'sampler',
         'mixup_alpha', 'mixup_prob', 'soft_label_weight',
         'val_strategy', 'aux_loss_weight', 'notes',
@@ -418,7 +418,7 @@ def main():
     parser = argparse.ArgumentParser(description='BirdCLEF 2026 完整訓練流程')
     parser.add_argument('--skip-preprocess', action='store_true',
                         help='跳過前處理步驟（HDF5 已存在時使用）')
-    parser.add_argument('--only', choices=['preprocess', 'cnn', 'panns'],
+    parser.add_argument('--only', choices=['preprocess', 'panns'],
                         help='只執行指定步驟')
     parser.add_argument('--test', action='store_true',
                         help='快速測試模式（30 筆資料、2 epoch，驗證流程可跑通）')
@@ -431,28 +431,20 @@ def main():
         return
 
     steps = {
-        'preprocess_mel': (str(base / 'preprocess.py'),          '步驟 1/4：前處理 Mel-Spectrogram HDF5（CNN 用）'),
-        'preprocess_wav': (str(base / 'preprocess_waveform.py'), '步驟 2/4：前處理 Waveform HDF5（PANNs 用）'),
-        'cnn':            (str(base / 'train.py'),                '步驟 3/4：訓練 CNN 模型'),
-        'panns':          (str(base / 'train_panns.py'),          '步驟 4/4：訓練 PANNs 模型'),
+        'preprocess_wav': (str(base / 'preprocess_waveform.py'), '步驟 1/2：前處理 Waveform HDF5（PANNs 用）'),
+        'panns':          (str(base / 'train_panns.py'),          '步驟 2/2：訓練 PANNs 模型'),
     }
 
     if args.only == 'preprocess':
-        run(*steps['preprocess_mel'])
         run(*steps['preprocess_wav'])
-    elif args.only == 'cnn':
-        run(*steps['cnn'])
     elif args.only == 'panns':
         run(*steps['panns'])
     else:
         if not args.skip_preprocess:
-            run(*steps['preprocess_mel'])
             run(*steps['preprocess_wav'])
         else:
             print("已跳過前處理步驟。")
-        run(*steps['cnn'])
         run(*steps['panns'])
-        # 訓練完成後寫入實驗紀錄
         log_experiment(base)
 
     print("\n" + "="*60)

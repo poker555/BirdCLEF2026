@@ -6,7 +6,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, WeightedRandomSampler, ConcatDataset
 import numpy as np
 import pandas as pd
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, average_precision_score
 from pathlib import Path
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -61,21 +61,55 @@ def build_split(h5_path: Path, sc_df: pd.DataFrame, rare_threshold: int = 5):
     return keys_train, keys_val
 
 
-def build_sampler(h5_path: Path, keys_train: list, sc_df: pd.DataFrame):
+def build_sampler(h5_path: Path, keys_train: list, sc_df: pd.DataFrame,
+                  train_df: pd.DataFrame = None):
+    """
+    weight = quality_weight(filename, rating) / sqrt(species_count)
+
+    - sqrt 平滑：避免 1/count 過於激進（499:1 → 22:1）
+    - 品質加權：只對 XC 音訊且 rating>0 有效，iNat 音訊維持 1.0
+      rating=5 → 1.0，rating=1 → 0.6，rating=0 或 iNat → 1.0
+    """
     count_map = dict(zip(sc_df['primary_label'].astype(str), sc_df['audio_count']))
+
+    # 建立 filename -> rating 查詢表（只有 train_df 提供時才用）
+    rating_map = {}
+    if train_df is not None:
+        for _, row in train_df.iterrows():
+            rating_map[str(row['filename'])] = float(row.get('rating', 0))
+
     CHUNK = 160000
+    AUG_SUFFIXES = ('_ts09', '_ts11', '_ps+1', '_ps-1')
     segment_weights = []
+
     with h5py.File(str(h5_path), 'r') as f:
         for key in keys_train:
             species = key.split('/')[0]
             cnt = count_map.get(species, 1)
-            w = 1.0 / cnt
+
+            # sqrt 平滑，避免極端比例
+            w = 1.0 / np.sqrt(cnt)
+
+            # 品質加權：還原原始 filename（去掉增強後綴）
+            base_fname = key
+            for suf in AUG_SUFFIXES:
+                if key.endswith(suf):
+                    base_fname = key[:-len(suf)]
+                    break
+            rating = rating_map.get(base_fname, 0)
+            fname_stem = base_fname.split('/')[-1] if '/' in base_fname else base_fname
+            if 'XC' in fname_stem and rating > 0:
+                # rating=5 → 1.0，rating=1 → 0.6，線性映射
+                quality_w = 0.5 + (rating / 5.0) * 0.5
+                w *= quality_w
+
             try:
                 total_samples = f[key].shape[0]
                 n_seg = max(1, total_samples // CHUNK)
             except Exception:
                 n_seg = 1
             segment_weights.extend([w] * n_seg)
+
     return segment_weights
 
 
@@ -86,6 +120,7 @@ def main():
     base_dir = Path(os.path.dirname(os.path.abspath(__file__))).parent
     h5_path  = base_dir / "processed_data" / "train_waveforms.h5"
     sc_df    = pd.read_csv(base_dir / "species_counts.csv")
+    train_df = pd.read_csv(base_dir / "train.csv")
 
     print("建立訓練/驗證切分...")
     keys_train, keys_val = build_split(h5_path, sc_df)
@@ -105,8 +140,8 @@ def main():
         val_dataset = ConcatDataset([val_dataset, sc_val_dataset])
         print(f"加入 soundscape 驗證集，驗證集總計 {len(val_dataset)} 個片段")
 
-    # WeightedRandomSampler
-    segment_weights = build_sampler(h5_path, keys_train, sc_df)
+    # WeightedRandomSampler（sqrt 平滑 + 品質加權）
+    segment_weights = build_sampler(h5_path, keys_train, sc_df, train_df=train_df)
     sampler = WeightedRandomSampler(
         weights=segment_weights,
         num_samples=len(segment_weights),
@@ -128,6 +163,7 @@ def main():
     epochs   = 100
     patience = 5
     best_f1  = 0.0
+    best_map = 0.0
     counter  = 0
     print("開始 PANNs 模型訓練")
 
@@ -165,31 +201,49 @@ def main():
         print(f"Epoch {epoch+1} 平均 Loss: {total_loss/len(train_loader):.4f}")
 
         model.eval()
-        all_preds, all_targets = [], []
+        all_preds, all_targets, all_probs = [], [], []
         with torch.no_grad():
             for waveforms, soft_labels, _ in val_loader:
                 waveforms   = waveforms.to(device)
                 soft_labels = soft_labels.to(device)
                 with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                     outputs = model(waveforms)
+                probs = torch.sigmoid(outputs).cpu().float().numpy()
+                all_probs.append(probs)
                 _, predicted   = torch.max(outputs, 1)
                 _, true_labels = torch.max(soft_labels, 1)
                 all_preds.extend(predicted.cpu().numpy())
                 all_targets.extend(true_labels.cpu().numpy())
 
+        # macro F1（argmax 預測）
         val_f1 = f1_score(all_targets, all_preds, average='macro', zero_division=0)
-        current_lr = optimizer.param_groups[0]['lr']
-        print(f"Epoch {epoch+1} 驗證 F1: {val_f1:.4f} | LR: {current_lr:.6f}")
-        scheduler.step(val_f1)
 
-        if val_f1 > best_f1:
-            best_f1 = val_f1
-            counter = 0
+        # mAP：需要 one-hot targets 和 sigmoid 機率
+        all_probs_np   = np.vstack(all_probs)                          # (N, 234)
+        targets_onehot = np.zeros_like(all_probs_np)
+        for i, t in enumerate(all_targets):
+            targets_onehot[i, t] = 1.0
+        # 只計算驗證集中有出現的類別，避免全零列造成 AP=0 拉低 mAP
+        present_classes = np.where(targets_onehot.sum(axis=0) > 0)[0]
+        val_map = average_precision_score(
+            targets_onehot[:, present_classes],
+            all_probs_np[:, present_classes],
+            average='macro'
+        )
+
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"Epoch {epoch+1} | F1: {val_f1:.4f} | mAP: {val_map:.4f} | LR: {current_lr:.6f}")
+        scheduler.step(val_map)  # 以 mAP 驅動學習率調整
+
+        if val_map > best_map:
+            best_map = val_map
+            best_f1  = val_f1
+            counter  = 0
             torch.save(model.state_dict(), base_dir / 'models' / 'best_panns_model.pth')
             print("==> 最佳模型已儲存")
         else:
             counter += 1
-            print(f"F1 未提升，累積 {counter}/{patience}")
+            print(f"mAP 未提升，累積 {counter}/{patience}")
             if counter >= patience:
                 print("==> Early Stopping")
                 break
@@ -199,10 +253,11 @@ def main():
     result = {
         'model':              'panns',
         'best_f1':            round(best_f1, 6),
+        'best_map':           round(best_map, 6),
         'epochs_trained':     epoch + 1,
         'rare_threshold':     5,
         'augmentation':       'time_stretch_0.9/1.1, pitch_shift_+/-1',
-        'sampler':            'WeightedRandomSampler(1/species_count)',
+        'sampler':            'WeightedRandomSampler(quality_weight/sqrt(species_count))',
         'mixup_alpha':        0.4,
         'mixup_prob':         0.7,
         'soft_label_weight':  0.3,

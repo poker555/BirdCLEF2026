@@ -129,19 +129,42 @@ def main():
     train_dataset = PANNsDataset(str(h5_path), keys_train, chunk_length=160000)
     val_dataset   = PANNsDataset(str(h5_path), keys_val,   chunk_length=160000)
 
-    # 加入 soundscape 驗證集
+    # soundscape 分流：train 部分加入訓練集，val 部分加入驗證集
     soundscape_dir = base_dir / 'train_soundscapes'
     labels_csv     = base_dir / 'train_soundscapes_labels.csv'
     taxonomy_csv   = base_dir / 'taxonomy_encoded.csv'
+    sc_train_size  = 0
     if soundscape_dir.exists() and labels_csv.exists():
-        sc_val_dataset = SoundscapeWaveformDataset(
-            str(soundscape_dir), str(labels_csv), str(taxonomy_csv)
+        sc_train_dataset = SoundscapeWaveformDataset(
+            str(soundscape_dir), str(labels_csv), str(taxonomy_csv),
+            split='train', sc_df=sc_df
         )
-        val_dataset = ConcatDataset([val_dataset, sc_val_dataset])
-        print(f"加入 soundscape 驗證集，驗證集總計 {len(val_dataset)} 個片段")
+        sc_val_dataset = SoundscapeWaveformDataset(
+            str(soundscape_dir), str(labels_csv), str(taxonomy_csv),
+            split='val', sc_df=sc_df
+        )
+        sc_train_size = len(sc_train_dataset)
+        train_dataset = ConcatDataset([train_dataset, sc_train_dataset])
+        val_dataset   = ConcatDataset([val_dataset,   sc_val_dataset])
+        print(f"soundscape 訓練集: {sc_train_size} 片段，驗證集: {len(sc_val_dataset)} 片段")
 
-    # WeightedRandomSampler（sqrt 平滑 + 品質加權）
+    print(f"訓練集總計 {len(train_dataset)} 個片段，驗證集 {len(val_dataset)} 個片段")
+
+    # WeightedRandomSampler：HDF5 片段 + soundscape 片段
     segment_weights = build_sampler(h5_path, keys_train, sc_df, train_df=train_df)
+    if sc_train_size > 0:
+        count_map = dict(zip(sc_df['primary_label'].astype(str), sc_df['audio_count']))
+        tax_df    = pd.read_csv(taxonomy_csv)
+        # label_id -> primary_label 反查表
+        id_to_sp  = {int(r['label_id']): str(r['primary_label']) for _, r in tax_df.iterrows()}
+        for sample in sc_train_dataset.samples:
+            primary_idx = int(np.argmax(sample['soft_label']))
+            sp  = id_to_sp.get(primary_idx, '')
+            cnt = count_map.get(sp, 1)
+            # 稀少物種（0筆）給 weight=2.0，其餘 1/sqrt(count)
+            w   = 2.0 if cnt == 0 else 1.0 / np.sqrt(max(cnt, 1))
+            segment_weights.append(w)
+
     sampler = WeightedRandomSampler(
         weights=segment_weights,
         num_samples=len(segment_weights),

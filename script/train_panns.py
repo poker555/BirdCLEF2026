@@ -178,7 +178,7 @@ def main():
             optimizer.zero_grad()
 
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                if np.random.rand() > 0.3:
+                if torch.rand(1).item() > 0.3:
                     mixed_wav, labels_a, labels_b, lam = mixup_data(waveforms, soft_labels)
                     logits_species, logits_class = model(mixed_wav)
                     mixed_soft = lam * labels_a + (1 - lam) * labels_b
@@ -201,7 +201,12 @@ def main():
         print(f"Epoch {epoch+1} 平均 Loss: {total_loss/len(train_loader):.4f}")
 
         model.eval()
-        all_preds, all_targets, all_probs = [], [], []
+        n_val = len(val_dataset)
+        all_probs_np   = np.empty((n_val, 234), dtype=np.float32)
+        all_preds      = np.empty(n_val, dtype=np.int64)
+        all_targets    = np.empty(n_val, dtype=np.int64)
+        ptr = 0
+
         with torch.no_grad():
             for waveforms, soft_labels, _ in val_loader:
                 waveforms   = waveforms.to(device)
@@ -209,25 +214,23 @@ def main():
                 with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                     outputs = model(waveforms)
                 probs = torch.sigmoid(outputs).cpu().float().numpy()
-                all_probs.append(probs)
-                _, predicted   = torch.max(outputs, 1)
-                _, true_labels = torch.max(soft_labels, 1)
-                all_preds.extend(predicted.cpu().numpy())
-                all_targets.extend(true_labels.cpu().numpy())
+                b = probs.shape[0]
+                all_probs_np[ptr:ptr + b] = probs
+                all_preds[ptr:ptr + b]    = outputs.argmax(dim=1).cpu().numpy()
+                all_targets[ptr:ptr + b]  = soft_labels.argmax(dim=1).cpu().numpy()
+                ptr += b
 
         # macro F1（argmax 預測）
-        val_f1 = f1_score(all_targets, all_preds, average='macro', zero_division=0)
+        val_f1 = f1_score(all_targets[:ptr], all_preds[:ptr], average='macro', zero_division=0)
 
-        # mAP：需要 one-hot targets 和 sigmoid 機率
-        all_probs_np   = np.vstack(all_probs)                          # (N, 234)
-        targets_onehot = np.zeros_like(all_probs_np)
-        for i, t in enumerate(all_targets):
+        # mAP：只計算驗證集中有出現的類別
+        targets_onehot  = np.zeros_like(all_probs_np[:ptr])
+        for i, t in enumerate(all_targets[:ptr]):
             targets_onehot[i, t] = 1.0
-        # 只計算驗證集中有出現的類別，避免全零列造成 AP=0 拉低 mAP
         present_classes = np.where(targets_onehot.sum(axis=0) > 0)[0]
         val_map = average_precision_score(
             targets_onehot[:, present_classes],
-            all_probs_np[:, present_classes],
+            all_probs_np[:ptr, present_classes],
             average='macro'
         )
 

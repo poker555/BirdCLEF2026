@@ -175,7 +175,7 @@ def main():
                             ds = h5_file.create_dataset(
                                 name=result['h5_key'],
                                 data=result['waveform'],
-                                compression='gzip', compression_opts=4
+                                compression='lzf'
                             )
                             ds.attrs['soft_label']  = soft_label
                             ds.attrs['class_id']    = class_id

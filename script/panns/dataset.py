@@ -1,7 +1,20 @@
+import threading
+
 import h5py
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
+# thread-local HDF5 file handle：避免每次 __getitem__ 重複開關檔案
+_tl = threading.local()
+
+
+def _get_h5(path: str) -> h5py.File:
+    """取得（或重建）當前 thread 的 HDF5 file handle。"""
+    f = getattr(_tl, 'file', None)
+    if f is None or not f.id.valid:
+        _tl.file = h5py.File(path, 'r')
+    return _tl.file
 
 
 class PANNsDataset(Dataset):
@@ -34,18 +47,20 @@ class PANNsDataset(Dataset):
     def __getitem__(self, idx):
         key, seg_idx, total_samples = self.samples[idx]
 
-        with h5py.File(self.h5_path, 'r') as f:
-            ds = f[key]
-            soft_label = ds.attrs['soft_label'].astype(np.float32)  # (234,)
-            class_id   = ds.attrs['class_id']
+        f  = _get_h5(self.h5_path)
+        ds = f[key]
+        soft_label = ds.attrs['soft_label'].astype(np.float32)  # (234,)
+        class_id   = int(ds.attrs['class_id'])
 
-            if total_samples <= self.chunk_length:
-                waveform = ds[:]
-            else:
-                seg_start = seg_idx * self.chunk_length
-                seg_end   = min(seg_start + self.chunk_length, total_samples) - self.chunk_length
-                start = seg_start if seg_start >= seg_end else np.random.randint(seg_start, seg_end + 1)
-                waveform = ds[start:start + self.chunk_length]
+        if total_samples <= self.chunk_length:
+            waveform = ds[:]
+        else:
+            # 修正 off-by-one：max_start 是合法的最大起始點
+            max_start = total_samples - self.chunk_length
+            seg_start = seg_idx * self.chunk_length
+            seg_end   = min(seg_start + self.chunk_length, max_start)
+            start     = int(np.random.randint(seg_start, seg_end + 1))
+            waveform  = ds[start:start + self.chunk_length]
 
         if len(waveform) < self.chunk_length:
             waveform = np.pad(waveform, (0, self.chunk_length - len(waveform)))

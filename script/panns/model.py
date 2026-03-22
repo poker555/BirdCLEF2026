@@ -64,15 +64,15 @@ class PANNsCNN10(nn.Module):
         # 1. 這裡的 input 是最原始的聲波 (Waveform)！例如 5 秒等於 160000 個採樣點
         x = self.mel_spectrogram(input)
         x = self.amplitude_to_db(x)
-        
-        # 增加通道數變成 (batch_size, 1, 時間, 頻率)
-        x = x.transpose(1, 2)
-        x = x.unsqueeze(1) 
-        
-        # 2. 通過第一層 BN，確保每次進來的頻譜量級不會落差太大
-        x = x.transpose(1, 3)
-        x = self.bn0(x)
-        x = x.transpose(1, 3)
+
+        # mel_spectrogram 輸出 (B, F, T)
+        # bn0 = BatchNorm2d(mel_bins)，需要 F 在 dim=1：(B, F, 1, T)
+        # 卷積期望 (B, 1, T, F)，BN 後再 transpose 回去
+        x = x.unsqueeze(2)          # (B, F, 1, T)
+        x = self.bn0(x)             # BN 作用在 F=mel_bins 維度
+        x = x.squeeze(2)            # (B, F, T)
+        x = x.transpose(1, 2)       # (B, T, F)
+        x = x.unsqueeze(1)          # (B, 1, T, F)
 
         # 3. 經過四層高強度卷積，榨出鳥的形狀與特徵
         x = self.conv_block1(x, pool_size=(2, 2))

@@ -354,18 +354,6 @@ def run_test_mode(base: Path):
     print("="*60)
 
 
-def run(script_path: str, desc: str):
-    print(f"\n{'='*60}")
-    print(f"  {desc}")
-    print(f"{'='*60}")
-    result = subprocess.run(
-        [sys.executable, script_path],
-        cwd=str(Path(__file__).resolve().parent.parent)
-    )
-    if result.returncode != 0:
-        print(f"\n[錯誤] {desc} 失敗，中止流程。")
-        sys.exit(result.returncode)
-    print(f"\n[完成] {desc}")
 
 
 def log_experiment(base: Path):

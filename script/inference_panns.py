@@ -67,10 +67,12 @@ class PANNsCNN10(nn.Module):
     def forward(self, x):
         x = self.mel_spectrogram(x)
         x = self.amplitude_to_db(x)
-        x = x.transpose(1, 2).unsqueeze(1)   # (B, 1, T, F)
-        x = x.transpose(1, 3)
-        x = self.bn0(x)
-        x = x.transpose(1, 3)
+        # 與 panns/model.py 保持一致的 BN 維度處理
+        x = x.unsqueeze(2)          # (B, F, 1, T)
+        x = self.bn0(x)             # BN 作用在 F=mel_bins 維度
+        x = x.squeeze(2)            # (B, F, T)
+        x = x.transpose(1, 2)       # (B, T, F)
+        x = x.unsqueeze(1)          # (B, 1, T, F)
         x = self.conv_block1(x)
         x = self.conv_block2(x)
         x = self.conv_block3(x)
@@ -80,7 +82,7 @@ class PANNsCNN10(nn.Module):
         x = F.dropout(x, p=0.2, training=self.training)
         x = F.relu(self.fc1(x))
         x = F.dropout(x, p=0.2, training=self.training)
-        return self.fc_audioset(x)   # 推論時只回傳物種 logits
+        return self.fc_audioset(x)
 
 
 # ==============================================================================
@@ -119,7 +121,10 @@ def predict_file(model, file_path: Path, device, class_columns, batch_size=64):
     with torch.no_grad():
         for i in range(0, len(tensor_wav), batch_size):
             batch = tensor_wav[i: i + batch_size].to(device)
-            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            if device.type == 'cuda':
+                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                    logits = model(batch)
+            else:
                 logits = model(batch)
             probs = torch.sigmoid(logits).cpu().float().numpy()
             all_probs.append(probs)

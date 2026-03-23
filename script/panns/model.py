@@ -39,7 +39,7 @@ class PANNsCNN10(nn.Module):
             hop_length=hop_size, 
             n_mels=mel_bins, 
             f_min=50, 
-            f_max=14000
+            f_max=16000
         )
         self.amplitude_to_db = torchaudio.transforms.AmplitudeToDB()
 

@@ -49,7 +49,7 @@ class PANNsCNN10(nn.Module):
         super().__init__()
         self.mel_spectrogram = torchaudio.transforms.MelSpectrogram(
             sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size,
-            n_mels=mel_bins, f_min=50, f_max=14000
+            n_mels=mel_bins, f_min=50, f_max=16000
         )
         self.amplitude_to_db = torchaudio.transforms.AmplitudeToDB()
         self.bn0         = nn.BatchNorm2d(mel_bins)

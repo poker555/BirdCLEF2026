@@ -14,9 +14,36 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from panns.dataset import PANNsDataset
 from panns.model import PANNsCNN10
 from soundscape_dataset import SoundscapeWaveformDataset
+from noise_dataset import NoiseDataset
 
 import h5py
 from sklearn.model_selection import train_test_split
+
+
+def add_noise(waveforms: torch.Tensor, noise_ds: 'NoiseDataset',
+              prob: float = 0.5, snr_db_range=(5, 20)) -> torch.Tensor:
+    """
+    以 prob 機率對 batch 中每條波形混入一段隨機噪音。
+    SNR 在 snr_db_range 之間均勻取樣，確保鳥聲仍清晰可辨。
+    """
+    if noise_ds is None or len(noise_ds) == 0:
+        return waveforms
+    result = waveforms.clone()
+    for i in range(result.shape[0]):
+        if torch.rand(1).item() > prob:
+            continue
+        noise = torch.tensor(noise_ds.sample(), dtype=torch.float32).to(waveforms.device)
+        # 對齊長度
+        if noise.shape[0] < result.shape[1]:
+            noise = noise.repeat(result.shape[1] // noise.shape[0] + 1)
+        noise = noise[:result.shape[1]]
+        # 依目標 SNR 縮放噪音
+        snr_db  = torch.empty(1).uniform_(*snr_db_range).item()
+        sig_rms = result[i].pow(2).mean().sqrt().clamp(min=1e-9)
+        noi_rms = noise.pow(2).mean().sqrt().clamp(min=1e-9)
+        scale   = sig_rms / (noi_rms * (10 ** (snr_db / 20)))
+        result[i] = (result[i] + noise * scale).clamp(-1.0, 1.0)
+    return result
 
 
 def mixup_data(x, y, alpha=0.4):
@@ -183,6 +210,14 @@ def main():
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
     scaler    = torch.amp.GradScaler('cuda')
 
+    # 噪音混入：從 train_soundscapes 抽取低能量片段
+    noise_ds = None
+    if soundscape_dir.exists():
+        noise_ds = NoiseDataset(str(soundscape_dir), chunk_length=160000, max_files=500)
+        if len(noise_ds) == 0:
+            print("⚠️  未找到低能量噪音片段，跳過噪音混入增強")
+            noise_ds = None
+
     epochs   = 100
     patience = 5
     best_f1  = 0.0
@@ -199,6 +234,9 @@ def main():
             soft_labels  = soft_labels.to(device)
             class_labels = class_labels.to(device)
             optimizer.zero_grad()
+
+            # 噪音混入增強（在 MixUp 之前，p=0.5，SNR 5~20 dB）
+            waveforms = add_noise(waveforms, noise_ds, prob=0.5, snr_db_range=(5, 20))
 
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 if torch.rand(1).item() > 0.3:
@@ -289,7 +327,7 @@ def main():
         'soft_label_weight':  0.3,
         'val_strategy':       'rare_all_train + stratified_80_20 + soundscape',
         'aux_loss_weight':    0.2,
-        'notes':              '',
+        'notes':              'noise_augmentation: soundscape low-energy chunks, p=0.5, SNR 5-20dB',
     }
     out_path = base_dir / 'models' / 'panns_train_result.json'
     with open(out_path, 'w', encoding='utf-8') as f:

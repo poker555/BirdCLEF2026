@@ -125,6 +125,7 @@ def run_test_mode(base: Path):
     """), encoding='utf-8')
 
     # 測試訓練：PANNs（2 epoch，batch_size=8，使用 test_waveforms.h5）
+    # 與正式訓練邏輯一致：MixUp、噪音混入、autocast、aux loss、WeightedSampler
     test_train_panns.write_text(textwrap.dedent("""
         import sys, os
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -133,16 +134,19 @@ def run_test_mode(base: Path):
             import torch, numpy as np, pandas as pd
             import torch.nn as nn, torch.optim as optim
             from pathlib import Path
-            from torch.utils.data import DataLoader, WeightedRandomSampler
-            from sklearn.metrics import f1_score
+            from torch.utils.data import DataLoader, WeightedRandomSampler, ConcatDataset
+            from sklearn.metrics import f1_score, average_precision_score
             from panns.dataset import PANNsDataset
             from panns.model import PANNsCNN10
-            from train_panns import build_split, build_sampler
+            from train_panns import build_split, build_sampler, mixup_data, add_noise
+            from noise_dataset import NoiseDataset
+            from soundscape_dataset import SoundscapeWaveformDataset
 
             device   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             base_dir = Path(os.path.dirname(os.path.abspath(__file__))).parent
             h5_path  = base_dir / 'processed_data/test_waveforms.h5'
             sc_df    = pd.read_csv(base_dir / 'species_counts.csv')
+            train_df = pd.read_csv(base_dir / 'train.csv')
 
             keys_train, keys_val = build_split(h5_path, sc_df)
             print(f"[TEST PANNs] 訓練 {len(keys_train)} 筆，驗證 {len(keys_val)} 筆")
@@ -150,35 +154,114 @@ def run_test_mode(base: Path):
             train_ds = PANNsDataset(str(h5_path), keys_train, chunk_length=160000)
             val_ds   = PANNsDataset(str(h5_path), keys_val,   chunk_length=160000) if keys_val else train_ds
 
-            seg_weights = build_sampler(h5_path, keys_train, sc_df)
+            # Soundscape 資料集（有則加入，無則跳過）
+            soundscape_dir = base_dir / 'train_soundscapes'
+            labels_csv     = base_dir / 'train_soundscapes_labels.csv'
+            taxonomy_csv   = base_dir / 'taxonomy_encoded.csv'
+            sc_train_size  = 0
+            if soundscape_dir.exists() and labels_csv.exists():
+                sc_train_ds = SoundscapeWaveformDataset(
+                    str(soundscape_dir), str(labels_csv), str(taxonomy_csv),
+                    split='train', sc_df=sc_df
+                )
+                sc_val_ds = SoundscapeWaveformDataset(
+                    str(soundscape_dir), str(labels_csv), str(taxonomy_csv),
+                    split='val', sc_df=sc_df
+                )
+                sc_train_size = len(sc_train_ds)
+                train_ds = ConcatDataset([train_ds, sc_train_ds])
+                val_ds   = ConcatDataset([val_ds,   sc_val_ds])
+                print(f"[TEST PANNs] soundscape 訓練 {sc_train_size} 筆，驗證 {len(sc_val_ds)} 筆")
+
+            # WeightedRandomSampler（含品質加權，與正式訓練一致）
+            seg_weights = build_sampler(h5_path, keys_train, sc_df, train_df=train_df)
+            if sc_train_size > 0:
+                count_map = dict(zip(sc_df['primary_label'].astype(str), sc_df['audio_count']))
+                tax_df    = pd.read_csv(taxonomy_csv)
+                id_to_sp  = {int(r['label_id']): str(r['primary_label']) for _, r in tax_df.iterrows()}
+                for sample in sc_train_ds.samples:
+                    primary_idx = int(np.argmax(sample['soft_label']))
+                    sp  = id_to_sp.get(primary_idx, '')
+                    cnt = count_map.get(sp, 1)
+                    seg_weights.append(2.0 if cnt == 0 else 1.0 / np.sqrt(max(cnt, 1)))
             sampler      = WeightedRandomSampler(seg_weights, len(seg_weights), replacement=True)
             train_loader = DataLoader(train_ds, batch_size=8, sampler=sampler, num_workers=0)
             val_loader   = DataLoader(val_ds,   batch_size=8, shuffle=False,   num_workers=0)
 
-            model     = PANNsCNN10(classes_num=234).to(device)
-            criterion = nn.BCEWithLogitsLoss()
-            optimizer = optim.AdamW(model.parameters(), lr=1e-3)
+            # 噪音混入
+            noise_ds = None
+            if soundscape_dir.exists():
+                noise_ds = NoiseDataset(str(soundscape_dir), chunk_length=160000, max_files=10)
+                if len(noise_ds) == 0:
+                    print("[TEST PANNs] ⚠️  未找到低能量噪音片段，跳過噪音混入")
+                    noise_ds = None
 
+            model              = PANNsCNN10(classes_num=234).to(device)
+            criterion_species  = nn.BCEWithLogitsLoss()
+            criterion_class    = nn.CrossEntropyLoss()
+            optimizer          = optim.AdamW(model.parameters(), lr=1e-3)
+            scaler             = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
+
+            # ── 訓練迴圈（與正式訓練完全一致）──
             for epoch in range(2):
                 model.train()
                 for waveforms, soft_labels, class_labels in train_loader:
-                    waveforms, soft_labels = waveforms.to(device), soft_labels.to(device)
+                    waveforms    = waveforms.to(device)
+                    soft_labels  = soft_labels.to(device)
+                    class_labels = class_labels.to(device)
                     optimizer.zero_grad()
-                    logits, _ = model(waveforms)
-                    loss = criterion(logits, soft_labels)
-                    loss.backward()
-                    optimizer.step()
-                print(f"[TEST PANNs] Epoch {epoch+1}/2 完成，loss={loss.item():.4f}")
 
+                    waveforms = add_noise(waveforms, noise_ds, prob=0.5, snr_db_range=(5, 20))
+
+                    with torch.amp.autocast('cuda' if device.type == 'cuda' else 'cpu',
+                                            dtype=torch.bfloat16,
+                                            enabled=(device.type == 'cuda')):
+                        if torch.rand(1).item() > 0.3:
+                            mixed_wav, labels_a, labels_b, lam = mixup_data(waveforms, soft_labels)
+                            logits_species, logits_class = model(mixed_wav)
+                            mixed_soft   = lam * labels_a + (1 - lam) * labels_b
+                            loss_species = criterion_species(logits_species, mixed_soft)
+                        else:
+                            logits_species, logits_class = model(waveforms)
+                            loss_species = criterion_species(logits_species, soft_labels)
+                        loss_class = criterion_class(logits_class, class_labels)
+                        loss       = loss_species + 0.2 * loss_class
+
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                print(f"[TEST PANNs] Epoch {epoch+1}/2 完成，loss={loss.item():.4f} "
+                      f"(sp={loss_species.item():.4f}, cl={loss_class.item():.4f})")
+
+            # ── 驗證迴圈（與正式訓練完全一致）──
             model.eval()
-            preds, targets = [], []
+            all_probs, all_preds, all_targets = [], [], []
             with torch.no_grad():
                 for waveforms, soft_labels, _ in val_loader:
-                    out = model(waveforms.to(device))
-                    preds.extend(torch.max(out, 1)[1].cpu().numpy())
-                    targets.extend(torch.max(soft_labels, 1)[1].numpy())
-            f1 = f1_score(targets, preds, average='macro', zero_division=0)
-            print(f"[TEST PANNs] 驗證 F1={f1:.4f}  ✅ PANNs 流程正常")
+                    waveforms = waveforms.to(device)
+                    with torch.amp.autocast('cuda' if device.type == 'cuda' else 'cpu',
+                                            dtype=torch.bfloat16,
+                                            enabled=(device.type == 'cuda')):
+                        outputs = model(waveforms)
+                    probs = torch.sigmoid(outputs).cpu().float().numpy()
+                    all_probs.append(probs)
+                    all_preds.extend(outputs.argmax(dim=1).cpu().numpy())
+                    all_targets.extend(soft_labels.argmax(dim=1).numpy())
+
+            all_probs   = np.vstack(all_probs)
+            all_targets = np.array(all_targets)
+            all_preds   = np.array(all_preds)
+            f1 = f1_score(all_targets, all_preds, average='macro', zero_division=0)
+
+            targets_onehot  = np.zeros_like(all_probs)
+            for i, t in enumerate(all_targets):
+                targets_onehot[i, t] = 1.0
+            present = np.where(targets_onehot.sum(axis=0) > 0)[0]
+            val_map = average_precision_score(
+                targets_onehot[:, present], all_probs[:, present], average='macro'
+            ) if len(present) > 0 else 0.0
+
+            print(f"[TEST PANNs] 驗證 F1={f1:.4f}  mAP={val_map:.4f}  ✅ PANNs 流程正常")
     """), encoding='utf-8')
 
     steps = [

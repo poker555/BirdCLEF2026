@@ -93,8 +93,26 @@ SR            = 32000
 CHUNK_SAMPLES = SR * 5   # 160000
 
 
+def _infer_batch(model, batch: torch.Tensor, device) -> np.ndarray:
+    """對一個 batch 執行推論，回傳 sigmoid 機率 (N, C)。"""
+    batch = batch.to(device)
+    with torch.no_grad():
+        if device.type == 'cuda':
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                logits = model(batch)
+        else:
+            logits = model(batch)
+    return torch.sigmoid(logits).cpu().float().numpy()
+
+
 def predict_file(model, file_path: Path, device, class_columns, batch_size=64):
-    """將單支音訊切成 5 秒片段，回傳 list of {row_id, ...probs}"""
+    """將單支音訊切成 5 秒片段，套用 TTA 後回傳 list of {row_id, ...probs}。
+
+    TTA 策略（3 次預測取平均）：
+      1. 原始波形
+      2. 音量 +6 dB（× 2.0）
+      3. 時間翻轉（[::-1]）
+    """
     try:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
@@ -114,25 +132,24 @@ def predict_file(model, file_path: Path, device, class_columns, batch_size=64):
         chunks.append(chunk)
         row_ids.append(f"{file_path.stem}_{(i + 1) * 5}")
 
-    tensor_wav = torch.tensor(np.array(chunks), dtype=torch.float32)
-    all_probs  = []
+    base    = np.array(chunks, dtype=np.float32)          # (N, L)
+    louder  = np.clip(base * 2.0, -1.0, 1.0)             # +6 dB
+    flipped = base[:, ::-1].copy()                        # 時間翻轉
 
     model.eval()
-    with torch.no_grad():
-        for i in range(0, len(tensor_wav), batch_size):
-            batch = tensor_wav[i: i + batch_size].to(device)
-            if device.type == 'cuda':
-                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                    logits = model(batch)
-            else:
-                logits = model(batch)
-            probs = torch.sigmoid(logits).cpu().float().numpy()
-            all_probs.append(probs)
+    all_probs = []
+    for variants in [base, louder, flipped]:
+        tensor = torch.tensor(variants, dtype=torch.float32)
+        probs_list = []
+        for i in range(0, len(tensor), batch_size):
+            probs_list.append(_infer_batch(model, tensor[i: i + batch_size], device))
+        all_probs.append(np.vstack(probs_list))           # (N, C)
 
-    all_probs = np.vstack(all_probs)   # (num_chunks, num_classes)
+    # 三次 TTA 平均
+    avg_probs = (all_probs[0] + all_probs[1] + all_probs[2]) / 3.0
 
     rows = []
-    for row_id, prob in zip(row_ids, all_probs):
+    for row_id, prob in zip(row_ids, avg_probs):
         row = {'row_id': row_id}
         row.update({col: float(prob[i]) for i, col in enumerate(class_columns)})
         rows.append(row)

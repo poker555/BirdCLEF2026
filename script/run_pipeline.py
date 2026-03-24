@@ -227,7 +227,7 @@ def log_experiment(base: Path):
     json_path = base.parent / 'models' / 'panns_train_result.json'
 
     fieldnames = [
-        'run_id', 'model', 'best_f1', 'best_map', 'epochs_trained',
+        'run_id', 'model', 'best_f1', 'best_map', 'kaggle_roc_auc', 'epochs_trained',
         'rare_threshold', 'augmentation', 'sampler',
         'mixup_alpha', 'mixup_prob', 'soft_label_weight',
         'val_strategy', 'aux_loss_weight', 'notes',

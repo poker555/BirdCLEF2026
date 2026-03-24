@@ -36,17 +36,22 @@ class NoiseDataset:
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
-                    y, _ = librosa.load(str(fp), sr=SAMPLE_RATE, mono=True)
+                    # 只讀前 60 秒，避免載入整支長音訊
+                    y, _ = librosa.load(str(fp), sr=SAMPLE_RATE, mono=True,
+                                        duration=60.0)
             except Exception:
                 continue
 
-            # 切成 chunk_length 片段，只保留低能量的
-            n = len(y) // self.chunk_length
+            # 切成 chunk_length 片段，只保留低能量的（每支最多取 3 個）
+            n = min(len(y) // self.chunk_length, 3)
+            found = 0
             for i in range(n):
                 chunk = y[i * self.chunk_length: (i + 1) * self.chunk_length]
                 rms = np.sqrt(np.mean(chunk ** 2))
                 if rms < RMS_THRESHOLD:
                     self.chunks.append(chunk.astype(np.float32))
+                    found += 1
+            # 若前 3 個都沒有低能量片段，跳過此檔案
 
     def sample(self) -> np.ndarray:
         """隨機回傳一個噪音片段 (chunk_length,)"""

@@ -208,7 +208,7 @@ def main():
     criterion_class   = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
-    scaler    = torch.amp.GradScaler('cuda')
+    scaler = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
 
     # 噪音混入：從 train_soundscapes 抽取低能量片段
     noise_ds = None
@@ -238,7 +238,9 @@ def main():
             # 噪音混入增強（在 MixUp 之前，p=0.5，SNR 5~20 dB）
             waveforms = add_noise(waveforms, noise_ds, prob=0.5, snr_db_range=(5, 20))
 
-            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            with torch.amp.autocast('cuda' if device.type == 'cuda' else 'cpu',
+                                    dtype=torch.bfloat16,
+                                    enabled=(device.type == 'cuda')):
                 if torch.rand(1).item() > 0.3:
                     mixed_wav, labels_a, labels_b, lam = mixup_data(waveforms, soft_labels)
                     logits_species, logits_class = model(mixed_wav)
@@ -272,7 +274,9 @@ def main():
             for waveforms, soft_labels, _ in val_loader:
                 waveforms   = waveforms.to(device)
                 soft_labels = soft_labels.to(device)
-                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                with torch.amp.autocast('cuda' if device.type == 'cuda' else 'cpu',
+                                        dtype=torch.bfloat16,
+                                        enabled=(device.type == 'cuda')):
                     outputs = model(waveforms)
                 probs = torch.sigmoid(outputs).cpu().float().numpy()
                 b = probs.shape[0]
@@ -318,6 +322,7 @@ def main():
         'model':              'panns',
         'best_f1':            round(best_f1, 6),
         'best_map':           round(best_map, 6),
+        'kaggle_roc_auc':     '',
         'epochs_trained':     epoch + 1,
         'rare_threshold':     5,
         'augmentation':       'time_stretch_0.9/1.1, pitch_shift_+/-1',

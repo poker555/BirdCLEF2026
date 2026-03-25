@@ -199,9 +199,9 @@ def main():
     )
 
     train_loader = DataLoader(train_dataset, batch_size=64, sampler=sampler,
-                              num_workers=8, pin_memory=True)
+                              num_workers=8, pin_memory=(device.type == 'cuda'))
     val_loader   = DataLoader(val_dataset, batch_size=64, shuffle=False,
-                              num_workers=8, pin_memory=True)
+                              num_workers=8, pin_memory=(device.type == 'cuda'))
 
     model = PANNsCNN10(classes_num=234).to(device)
     criterion_species = nn.BCEWithLogitsLoss()

@@ -44,8 +44,8 @@ class ConvBlock(nn.Module):
 
 
 class PANNsCNN10(nn.Module):
-    def __init__(self, sample_rate=32000, window_size=1024, hop_size=320,
-                 mel_bins=128, classes_num=234, num_groups=5):
+    def __init__(self, sample_rate=32000, window_size=512, hop_size=320,
+                 mel_bins=160, classes_num=234, num_groups=5):
         super().__init__()
         self.mel_spectrogram = torchaudio.transforms.MelSpectrogram(
             sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size,

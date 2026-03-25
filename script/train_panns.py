@@ -308,7 +308,7 @@ def main():
             best_f1  = val_f1
             counter  = 0
             torch.save(model.state_dict(), base_dir / 'models' / 'best_panns_model.pth')
-            print("==> 最佳模型已儲存")
+            print(f"==> 最佳模型已儲存（暫存為 best_panns_model.pth）")
         else:
             counter += 1
             print(f"mAP 未提升，累積 {counter}/{patience}")
@@ -316,9 +316,24 @@ def main():
                 print("==> Early Stopping")
                 break
 
+    # 決定本次模型的北約名稱（依 models/ 下已有的命名檔案自動遞增）
+    NATO = [
+        'alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf',
+        'hotel', 'india', 'juliet', 'kilo', 'lima', 'mike', 'november',
+        'oscar', 'papa', 'quebec', 'romeo', 'sierra', 'tango', 'uniform',
+        'victor', 'whiskey', 'xray', 'yankee', 'zulu'
+    ]
+    existing = {p.stem.replace('model_', '') for p in (base_dir / 'models').glob('model_*.pth')}
+    model_codename = next((n for n in NATO if n not in existing), f'model_{len(existing)}')
+    named_model_path = base_dir / 'models' / f'model_{model_codename}.pth'
+    import shutil
+    shutil.copy(base_dir / 'models' / 'best_panns_model.pth', named_model_path)
+    print(f"==> 模型已命名並儲存：{named_model_path.name}")
+
     # 訓練結果寫入 JSON，供 run_pipeline.py 讀取後追加到 experiment_log.csv
     import json
     result = {
+        'model_name':         model_codename,
         'model':              'panns',
         'best_f1':            round(best_f1, 6),
         'best_map':           round(best_map, 6),

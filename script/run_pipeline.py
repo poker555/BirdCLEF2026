@@ -310,7 +310,7 @@ def log_experiment(base: Path):
     json_path = base.parent / 'models' / 'panns_train_result.json'
 
     fieldnames = [
-        'run_id', 'model', 'best_f1', 'best_map', 'kaggle_roc_auc', 'epochs_trained',
+        'run_id', 'model_name', 'model', 'best_f1', 'best_map', 'kaggle_roc_auc', 'epochs_trained',
         'rare_threshold', 'augmentation', 'sampler',
         'mixup_alpha', 'mixup_prob', 'soft_label_weight',
         'val_strategy', 'aux_loss_weight', 'notes',
@@ -333,7 +333,7 @@ def log_experiment(base: Path):
         writer.writerow(row)
 
     print(f"\n[LOG] 實驗紀錄已追加至 {log_path}（run_id: {run_id}）")
-    print(f"      panns | best_f1={row['best_f1']} | epochs={row['epochs_trained']}")
+    print(f"      [{row['model_name']}] panns | best_f1={row['best_f1']} | best_map={row['best_map']} | epochs={row['epochs_trained']}")
 
 
 def main():

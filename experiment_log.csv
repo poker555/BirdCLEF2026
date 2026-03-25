@@ -1,2 +1,3 @@
-﻿run_id,model,best_f1,best_map,kaggle_roc_auc,epochs_trained,rare_threshold,augmentation,sampler,mixup_alpha,mixup_prob,soft_label_weight,val_strategy,aux_loss_weight,notes
-2026-03-24 22:57:04,panns,0.578562,0.647239,0.87,94,5,"time_stretch_0.9/1.1, pitch_shift_+/-1",WeightedRandomSampler(quality_weight/sqrt(species_count)),0.4,0.7,0.3,rare_all_train + stratified_80_20 + soundscape,0.2,baseline
+﻿run_id,model_name,model,best_f1,best_map,kaggle_roc_auc,epochs_trained,rare_threshold,augmentation,sampler,mixup_alpha,mixup_prob,soft_label_weight,val_strategy,aux_loss_weight,notes
+2026-03-24 22:57:04,alpha,panns,0.578562,0.647239,0.87,94,5,"time_stretch_0.9/1.1, pitch_shift_+/-1",WeightedRandomSampler(quality_weight/sqrt(species_count)),0.4,0.7,0.3,rare_all_train + stratified_80_20 + soundscape,0.2,baseline
+2026-03-25 18:41:49,bravo,panns,0.571955,0.631701,,75,5,"time_stretch_0.9/1.1, pitch_shift_+/-1",WeightedRandomSampler(quality_weight/sqrt(species_count)),0.4,0.7,0.3,rare_all_train + stratified_80_20 + soundscape,0.2,"noise_augmentation: soundscape low-energy chunks, p=0.5, SNR 5-20dB"

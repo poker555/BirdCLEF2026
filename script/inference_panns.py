@@ -90,63 +90,62 @@ class PANNsCNN10(nn.Module):
 # ==============================================================================
 
 SR            = 32000
-CHUNK_SAMPLES = SR * 5   # 160000
+CHUNK_SAMPLES = SR * 5        # 160000
+MIN_VALID_RATIO = 0.5         # 最後一個 chunk 有效音訊比例門檻（低於此則跳過）
+MAX_AUDIO_DURATION = 600.0    # librosa 最多讀取秒數（防禦性上限）
 
 
 def _infer_batch(model, batch: torch.Tensor, device) -> np.ndarray:
     """對一個 batch 執行推論，回傳 sigmoid 機率 (N, C)。"""
-    batch = batch.to(device)
     with torch.no_grad():
-        if device.type == 'cuda':
-            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                logits = model(batch)
-        else:
-            logits = model(batch)
+        logits = model(batch.to(device))
     return torch.sigmoid(logits).cpu().float().numpy()
 
 
 def predict_file(model, file_path: Path, device, class_columns, batch_size=64):
-    """將單支音訊切成 5 秒片段，套用 TTA 後回傳 list of {row_id, ...probs}。
+    """將單支音訊切成 5 秒片段，回傳 list of {row_id, ...probs}。
 
-    TTA 策略（3 次預測取平均）：
-      1. 原始波形
-      2. 音量 +6 dB（× 2.0）
-      3. 時間翻轉（[::-1]）
+    CPU 推論優化版：
+      - 移除 TTA（×3 → ×1），符合 90 分鐘 CPU 限制
+      - librosa.load 加 duration 上限，避免超長音訊拖慢速度
+      - 最後一個 chunk 有效比例 < 50% 則跳過
     """
     try:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            waveform, _ = librosa.load(str(file_path), sr=SR, mono=True)
+            waveform, _ = librosa.load(str(file_path), sr=SR, mono=True,
+                                       duration=MAX_AUDIO_DURATION)
     except Exception as e:
         print(f"[錯誤] 無法讀取 {file_path.name}: {e}")
         return []
 
-    num_chunks = max(1, int(np.ceil(len(waveform) / CHUNK_SAMPLES)))
+    total_samples = len(waveform)
+    num_chunks    = max(1, int(np.ceil(total_samples / CHUNK_SAMPLES)))
     chunks, row_ids = [], []
 
     for i in range(num_chunks):
-        start = i * CHUNK_SAMPLES
-        chunk = waveform[start: start + CHUNK_SAMPLES]
-        if len(chunk) < CHUNK_SAMPLES:
-            chunk = np.pad(chunk, (0, CHUNK_SAMPLES - len(chunk)))
-        chunks.append(chunk)
+        start        = i * CHUNK_SAMPLES
+        raw_chunk    = waveform[start: start + CHUNK_SAMPLES]
+        valid_len    = len(raw_chunk)
+
+        # 最後一個 chunk：有效音訊不足 50% 則跳過
+        if valid_len < CHUNK_SAMPLES and valid_len / CHUNK_SAMPLES < MIN_VALID_RATIO:
+            continue
+
+        if valid_len < CHUNK_SAMPLES:
+            raw_chunk = np.pad(raw_chunk, (0, CHUNK_SAMPLES - valid_len))
+        chunks.append(raw_chunk)
         row_ids.append(f"{file_path.stem}_{(i + 1) * 5}")
 
-    base    = np.array(chunks, dtype=np.float32)          # (N, L)
-    louder  = np.clip(base * 2.0, -1.0, 1.0)             # +6 dB
-    flipped = base[:, ::-1].copy()                        # 時間翻轉
+    if not chunks:
+        return []
 
     model.eval()
-    all_probs = []
-    for variants in [base, louder, flipped]:
-        tensor = torch.tensor(variants, dtype=torch.float32)
-        probs_list = []
-        for i in range(0, len(tensor), batch_size):
-            probs_list.append(_infer_batch(model, tensor[i: i + batch_size], device))
-        all_probs.append(np.vstack(probs_list))           # (N, C)
-
-    # 三次 TTA 平均
-    avg_probs = (all_probs[0] + all_probs[1] + all_probs[2]) / 3.0
+    tensor     = torch.tensor(np.array(chunks, dtype=np.float32))
+    probs_list = []
+    for i in range(0, len(tensor), batch_size):
+        probs_list.append(_infer_batch(model, tensor[i: i + batch_size], device))
+    avg_probs = np.vstack(probs_list)
 
     rows = []
     for row_id, prob in zip(row_ids, avg_probs):
@@ -163,6 +162,11 @@ def predict_file(model, file_path: Path, device, class_columns, batch_size=64):
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"推論裝置: {device}")
+
+    # CPU 多執行緒優化（Kaggle CPU 有 4 核心）
+    if device.type == 'cpu':
+        torch.set_num_threads(4)
+        print("CPU 推論模式：設定 torch threads = 4")
 
     # ── 路徑設定 ──────────────────────────────────────────────────────
     kaggle_test_dir = Path('/kaggle/input/birdclef-2026/test_soundscapes')

@@ -245,7 +245,7 @@ def run_test_mode(base: Path):
                         outputs = model(waveforms)
                     probs = torch.sigmoid(outputs).cpu().float().numpy()
                     all_probs.append(probs)
-                    all_preds.extend(outputs.argmax(dim=1).cpu().numpy())
+                    all_preds.extend(outputs.argmax(dim=1).cpu().float().numpy().astype(int))
                     all_targets.extend(soft_labels.argmax(dim=1).numpy())
 
             all_probs   = np.vstack(all_probs)

@@ -281,7 +281,7 @@ def main():
                 probs = torch.sigmoid(outputs).cpu().float().numpy()
                 b = probs.shape[0]
                 all_probs_np[ptr:ptr + b] = probs
-                all_preds[ptr:ptr + b]    = outputs.argmax(dim=1).cpu().numpy()
+                all_preds[ptr:ptr + b]    = outputs.argmax(dim=1).cpu().float().numpy().astype(np.int64)
                 all_targets[ptr:ptr + b]  = soft_labels.argmax(dim=1).cpu().numpy()
                 ptr += b
 

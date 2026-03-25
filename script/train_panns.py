@@ -347,7 +347,7 @@ def main():
         'soft_label_weight':  0.3,
         'val_strategy':       'rare_all_train + stratified_80_20 + soundscape',
         'aux_loss_weight':    0.2,
-        'notes':              'n_fft=512, n_mels=160, noise_augmentation: soundscape low-energy chunks, p=0.5, SNR 5-20dB',
+        'notes':              'n_fft=512, n_mels=128, noise_augmentation: soundscape low-energy chunks, p=0.5, SNR 5-20dB',
     }
     out_path = base_dir / 'models' / 'panns_train_result.json'
     with open(out_path, 'w', encoding='utf-8') as f:

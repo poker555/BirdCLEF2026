@@ -29,7 +29,7 @@ class ConvBlock(nn.Module):
 
 # === CNN10 模型本體 ===
 class PANNsCNN10(nn.Module):
-    def __init__(self, sample_rate=32000, window_size=512, hop_size=320, mel_bins=160, classes_num=234, num_groups=5):
+    def __init__(self, sample_rate=32000, window_size=512, hop_size=320, mel_bins=128, classes_num=234, num_groups=5):
         super(PANNsCNN10, self).__init__()
 
         # GPU 內建的超狂頻譜轉換器！直接掛在網路的最前端

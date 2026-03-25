@@ -21,7 +21,8 @@ from panns.model import PANNsCNN10
 from train_panns import build_split
 
 
-def main():
+def run_analysis(model_path: Path, out_csv: Path = None):
+    """對指定模型跑驗證集分析，回傳 DataFrame。"""
     device   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     base_dir = Path(os.path.dirname(os.path.abspath(__file__))).parent
     h5_path  = base_dir / 'processed_data' / 'train_waveforms.h5'
@@ -37,7 +38,6 @@ def main():
                              num_workers=4, pin_memory=True)
 
     model = PANNsCNN10(classes_num=234).to(device)
-    model_path = base_dir / 'models' / 'best_panns_model.pth'
     state = torch.load(str(model_path), map_location=device)
     model.load_state_dict(state, strict=False)
     model.eval()
@@ -108,9 +108,10 @@ def main():
     df_valid['roc_auc'] = df_valid['roc_auc'].astype(float)
     df_sorted = df_valid.sort_values('roc_auc')
 
-    out_path = base_dir / 'models' / 'per_class_analysis.csv'
-    df_sorted.to_csv(out_path, index=False, encoding='utf-8-sig')
-    print(f"\n結果已儲存：{out_path}")
+    if out_csv is None:
+        out_csv = base_dir / 'models' / 'per_class_analysis.csv'
+    df_sorted.to_csv(out_csv, index=False, encoding='utf-8-sig')
+    print(f"\n結果已儲存：{out_csv}")
 
     # ── 摘要輸出 ──────────────────────────────────────────────────────
     print(f"\n{'='*65}")
@@ -142,6 +143,24 @@ def main():
     rare = df_valid[df_valid['audio_count'].astype(float) <= 10]
     if len(rare):
         print(f"\n【稀少物種（訓練資料 ≤10 筆）平均 AUC：{rare['roc_auc'].mean():.4f}，共 {len(rare)} 種】")
+
+    return df_valid
+
+
+def main():
+    import argparse
+    base_dir = Path(os.path.dirname(os.path.abspath(__file__))).parent
+
+    parser = argparse.ArgumentParser(description='Per-class 弱點分析')
+    parser.add_argument('--model', type=str,
+                        default=str(base_dir / 'models' / 'model_alpha.pth'),
+                        help='模型權重路徑（預設：model_alpha.pth）')
+    parser.add_argument('--out', type=str, default=None,
+                        help='輸出 CSV 路徑（預設：models/per_class_analysis.csv）')
+    args = parser.parse_args()
+
+    out_csv = Path(args.out) if args.out else None
+    run_analysis(Path(args.model), out_csv)
 
 
 if __name__ == '__main__':

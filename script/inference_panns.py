@@ -67,12 +67,11 @@ class PANNsCNN10(nn.Module):
     def forward(self, x):
         x = self.mel_spectrogram(x)
         x = self.amplitude_to_db(x)
-        # 與 panns/model.py 保持一致的 BN 維度處理
-        x = x.unsqueeze(2)          # (B, F, 1, T)
-        x = self.bn0(x)             # BN 作用在 F=mel_bins 維度
-        x = x.squeeze(2)            # (B, F, T)
-        x = x.transpose(1, 2)       # (B, T, F)
-        x = x.unsqueeze(1)          # (B, 1, T, F)
+        x = x.unsqueeze(2)
+        x = self.bn0(x)
+        x = x.squeeze(2)
+        x = x.transpose(1, 2)
+        x = x.unsqueeze(1)
         x = self.conv_block1(x)
         x = self.conv_block2(x)
         x = self.conv_block3(x)
@@ -83,6 +82,7 @@ class PANNsCNN10(nn.Module):
         x = F.relu(self.fc1(x))
         x = F.dropout(x, p=0.2, training=self.training)
         return self.fc_audioset(x)
+        # 注意：推論時 training=False，SpecAugment 不會套用
 
 
 # ==============================================================================

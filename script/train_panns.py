@@ -53,6 +53,28 @@ def mixup_data(x, y, alpha=0.4):
     return mixed_x, y, y[index], lam
 
 
+def spec_augment(mel: torch.Tensor,
+                 freq_mask_param: int = 20,
+                 time_mask_param: int = 40,
+                 num_freq_masks: int = 2,
+                 num_time_masks: int = 2) -> torch.Tensor:
+    """
+    SpecAugment：對 mel 頻譜圖套用頻率與時間遮罩。
+    輸入 mel shape: (B, 1, T, F)
+    """
+    out = mel.clone()
+    _, _, T, F = out.shape
+    for _ in range(num_freq_masks):
+        f = torch.randint(0, freq_mask_param, (1,)).item()
+        f0 = torch.randint(0, max(1, F - f), (1,)).item()
+        out[:, :, :, f0:f0 + f] = 0
+    for _ in range(num_time_masks):
+        t = torch.randint(0, time_mask_param, (1,)).item()
+        t0 = torch.randint(0, max(1, T - t), (1,)).item()
+        out[:, :, t0:t0 + t, :] = 0
+    return out
+
+
 def build_split(h5_path: Path, sc_df: pd.DataFrame, rare_threshold: int = 5):
     """
     稀少物種全進訓練集，一般物種 stratified 80/20 split。
@@ -198,30 +220,50 @@ def main():
         replacement=True
     )
 
-    # Windows 上 num_workers>0 會有多進程競爭 HDF5 的問題，使用 0
-    num_workers = 0
-    train_loader = DataLoader(train_dataset, batch_size=64, sampler=sampler,
-                              num_workers=num_workers, pin_memory=(device.type == 'cuda'))
-    val_loader   = DataLoader(val_dataset, batch_size=64, shuffle=False,
-                              num_workers=num_workers, pin_memory=(device.type == 'cuda'))
+    # 高算力環境：num_workers=4，batch_size=128
+    # Windows 本機：num_workers=0，batch_size=64
+    is_high_perf = (device.type == 'cuda') and torch.cuda.device_count() >= 1
+    num_workers = 4 if is_high_perf else 0
+    batch_size  = 128 if is_high_perf else 64
+    print(f"DataLoader: num_workers={num_workers}, batch_size={batch_size}")
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler,
+                              num_workers=num_workers, pin_memory=(device.type == 'cuda'),
+                              persistent_workers=(num_workers > 0))
+    val_loader   = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
+                              num_workers=num_workers, pin_memory=(device.type == 'cuda'),
+                              persistent_workers=(num_workers > 0))
 
     model = PANNsCNN10(classes_num=234).to(device)
-    criterion_species = nn.BCEWithLogitsLoss()
-    criterion_class   = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=1e-3)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
+    # Label Smoothing：BCEWithLogitsLoss 加 smoothing=0.05
+    smoothing = 0.05
+    criterion_species = nn.BCEWithLogitsLoss(
+        pos_weight=None,
+        reduction='mean'
+    )
+    criterion_class   = nn.CrossEntropyLoss(label_smoothing=0.05)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    # Cosine Annealing LR（取代 ReduceLROnPlateau）
+    epochs   = 100
+    patience = 7
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=epochs, eta_min=1e-6
+    )
     scaler = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
 
-    # 噪音混入：從 train_soundscapes 抽取低能量片段
-    noise_ds = None
-    if soundscape_dir.exists():
-        noise_ds = NoiseDataset(str(soundscape_dir), chunk_length=160000, max_files=500)
-        if len(noise_ds) == 0:
-            print("⚠️  未找到低能量噪音片段，跳過噪音混入增強")
-            noise_ds = None
+    # 噪音混入：優先使用 ESC-50，補充 train_soundscapes 低能量片段
+    esc50_dir = base_dir / 'ESC-50-master' / 'audio'
+    noise_ds = NoiseDataset(
+        chunk_length=160000,
+        esc50_dir=str(esc50_dir) if esc50_dir.exists() else None,
+        soundscape_dir=str(soundscape_dir) if soundscape_dir.exists() else None,
+        max_soundscape_files=500,
+    )
+    if len(noise_ds) == 0:
+        print("⚠️  未找到噪音片段，跳過噪音混入增強")
+        noise_ds = None
 
     epochs   = 100
-    patience = 5
+    patience = 7
     best_f1  = 0.0
     best_map = 0.0
     counter  = 0
@@ -247,14 +289,20 @@ def main():
                     mixed_wav, labels_a, labels_b, lam = mixup_data(waveforms, soft_labels)
                     logits_species, logits_class = model(mixed_wav)
                     mixed_soft = lam * labels_a + (1 - lam) * labels_b
+                    # Label smoothing for BCE
+                    mixed_soft = mixed_soft * (1 - smoothing) + smoothing / mixed_soft.shape[1]
                     loss_species = criterion_species(logits_species, mixed_soft)
                 else:
                     logits_species, logits_class = model(waveforms)
-                    loss_species = criterion_species(logits_species, soft_labels)
+                    soft_labels_s = soft_labels * (1 - smoothing) + smoothing / soft_labels.shape[1]
+                    loss_species = criterion_species(logits_species, soft_labels_s)
                 loss_class = criterion_class(logits_class, class_labels)
                 loss = loss_species + 0.2 * loss_class
 
             scaler.scale(loss).backward()
+            # Gradient Clipping（防止梯度爆炸）
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             scaler.step(optimizer)
             scaler.update()
             total_loss += loss.item()
@@ -303,7 +351,7 @@ def main():
 
         current_lr = optimizer.param_groups[0]['lr']
         print(f"Epoch {epoch+1} | F1: {val_f1:.4f} | mAP: {val_map:.4f} | LR: {current_lr:.6f}")
-        scheduler.step(val_map)  # 以 mAP 驅動學習率調整
+        scheduler.step()  # Cosine Annealing：每 epoch 更新
 
         if val_map > best_map:
             best_map = val_map
@@ -349,7 +397,7 @@ def main():
         'soft_label_weight':  0.3,
         'val_strategy':       'rare_all_train + stratified_80_20 + soundscape',
         'aux_loss_weight':    0.2,
-        'notes':              'n_fft=1024, n_mels=160, noise_augmentation: soundscape low-energy chunks, p=0.5, SNR 5-20dB',
+        'notes': 'n_fft=1024, n_mels=160, ESC-50 noise aug, SpecAugment, CosineAnnealingLR, label_smoothing=0.05, grad_clip=5.0',
     }
     out_path = base_dir / 'models' / 'panns_train_result.json'
     with open(out_path, 'w', encoding='utf-8') as f:

@@ -61,41 +61,56 @@ class PANNsCNN10(nn.Module):
         init_layer(self.fc_class)
 
     def forward(self, input):
-        # 1. 這裡的 input 是最原始的聲波 (Waveform)！例如 5 秒等於 160000 個採樣點
         x = self.mel_spectrogram(input)
         x = self.amplitude_to_db(x)
 
-        # mel_spectrogram 輸出 (B, F, T)
-        # bn0 = BatchNorm2d(mel_bins)，需要 F 在 dim=1：(B, F, 1, T)
-        # 卷積期望 (B, 1, T, F)，BN 後再 transpose 回去
         x = x.unsqueeze(2)          # (B, F, 1, T)
         x = self.bn0(x)             # BN 作用在 F=mel_bins 維度
         x = x.squeeze(2)            # (B, F, T)
         x = x.transpose(1, 2)       # (B, T, F)
         x = x.unsqueeze(1)          # (B, 1, T, F)
 
-        # 3. 經過四層高強度卷積，榨出鳥的形狀與特徵
+        # SpecAugment（訓練時才套用）
+        if self.training:
+            x = self._spec_augment(x)
+
         x = self.conv_block1(x, pool_size=(2, 2))
         x = self.conv_block2(x, pool_size=(2, 2))
         x = self.conv_block3(x, pool_size=(2, 2))
         x = self.conv_block4(x, pool_size=(2, 2))
         
-        # 4. 全局平均池化 (把剩下的長與寬都濃縮，變成只有 512 個點的特徵條)
         x = torch.mean(x, dim=3)
         (x, _) = torch.max(x, dim=2)
         
-        # 5. 輸出預測
         x = F.dropout(x, p=0.2, training=self.training)
         x = F.relu(self.fc1(x))
         x = F.dropout(x, p=0.2, training=self.training)
         
-        # 最終分數
         logits_species = self.fc_audioset(x)
 
         if self.training:
             logits_class = self.fc_class(x)
             return logits_species, logits_class
         return logits_species
+
+    @staticmethod
+    def _spec_augment(x: torch.Tensor,
+                      freq_mask_param: int = 20,
+                      time_mask_param: int = 40,
+                      num_freq_masks: int = 2,
+                      num_time_masks: int = 2) -> torch.Tensor:
+        """x shape: (B, 1, T, F)"""
+        out = x.clone()
+        T, F = out.shape[2], out.shape[3]
+        for _ in range(num_freq_masks):
+            f  = torch.randint(1, freq_mask_param + 1, (1,)).item()
+            f0 = torch.randint(0, max(1, F - f), (1,)).item()
+            out[:, :, :, f0:f0 + f] = 0
+        for _ in range(num_time_masks):
+            t  = torch.randint(1, time_mask_param + 1, (1,)).item()
+            t0 = torch.randint(0, max(1, T - t), (1,)).item()
+            out[:, :, t0:t0 + t, :] = 0
+        return out
 
 if __name__ == '__main__':
     print("正在建構 CNN10 神經網路中...")

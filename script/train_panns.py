@@ -253,10 +253,9 @@ def main():
     # 噪音混入：優先使用 ESC-50，補充 train_soundscapes 低能量片段
     esc50_dir = base_dir / 'ESC-50-master' / 'audio'
     noise_ds = NoiseDataset(
-        chunk_length=160000,
-        esc50_dir=str(esc50_dir) if esc50_dir.exists() else None,
-        soundscape_dir=str(soundscape_dir) if soundscape_dir.exists() else None,
-        max_soundscape_files=500,
+        esc50_dir=str(esc50_dir),
+        chunk_length=CHUNK_LENGTH,
+        auto_download=True,
     )
     if len(noise_ds) == 0:
         print("⚠️  未找到噪音片段，跳過噪音混入增強")
@@ -279,20 +278,21 @@ def main():
             class_labels = class_labels.to(device)
             optimizer.zero_grad()
 
-            # 噪音混入增強（在 MixUp 之前，p=0.5，SNR 5~20 dB）
-            waveforms = add_noise(waveforms, noise_ds, prob=0.5, snr_db_range=(5, 20))
-
             with torch.amp.autocast('cuda' if device.type == 'cuda' else 'cpu',
                                     dtype=torch.bfloat16,
                                     enabled=(device.type == 'cuda')):
                 if torch.rand(1).item() > 0.3:
                     mixed_wav, labels_a, labels_b, lam = mixup_data(waveforms, soft_labels)
+                    # 噪音混入增強（在 MixUp 之後，p=0.5，SNR 5~20 dB）
+                    mixed_wav = add_noise(mixed_wav, noise_ds, prob=0.5, snr_db_range=(5, 20))
                     logits_species, logits_class = model(mixed_wav)
                     mixed_soft = lam * labels_a + (1 - lam) * labels_b
                     # Label smoothing for BCE
                     mixed_soft = mixed_soft * (1 - smoothing) + smoothing / mixed_soft.shape[1]
                     loss_species = criterion_species(logits_species, mixed_soft)
                 else:
+                    # 噪音混入增強（在 MixUp 之後，p=0.5，SNR 5~20 dB）
+                    waveforms = add_noise(waveforms, noise_ds, prob=0.5, snr_db_range=(5, 20))
                     logits_species, logits_class = model(waveforms)
                     soft_labels_s = soft_labels * (1 - smoothing) + smoothing / soft_labels.shape[1]
                     loss_species = criterion_species(logits_species, soft_labels_s)

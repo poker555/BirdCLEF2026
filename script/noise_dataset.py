@@ -1,64 +1,110 @@
 """
-NoiseDataset：從 train_soundscapes 中抽取低能量（無鳥聲）片段作為噪音來源。
+NoiseDataset：從 ESC-50 資料集下載並抽取指定類別的音訊作為噪音來源。
+
+保留類別（在野外生物錄音中可能出現的環境音）：
+  10 - rain          雨聲
+  13 - crickets      蟋蟀
+  15 - water_drops   水滴
+  16 - wind          風聲
+  17 - pouring_water 流水
+  19 - thunderstorm  雷雨
+  25 - footsteps     腳步聲
+  26 - laughing      笑聲（人聲）
+  43 - car_horn      汽車喇叭
+  44 - engine        引擎聲
 
 使用方式：
-    noise_ds = NoiseDataset(soundscape_dir, chunk_length=160000, max_files=500)
+    noise_ds = NoiseDataset('ESC-50-master/audio')
     noise_wav = noise_ds.sample()   # 回傳 (160000,) numpy array
 """
 
 import warnings
+import zipfile
+import urllib.request
 import numpy as np
 from pathlib import Path
 
+SAMPLE_RATE = 32000
 
-SAMPLE_RATE   = 32000
-RMS_THRESHOLD = 0.01   # 低於此 RMS 視為低能量片段（無明顯鳥聲）
+# 保留的 ESC-50 target 編號
+ALLOWED_TARGETS = {10, 13, 15, 16, 17, 19, 25, 26, 43, 44}
+
+ESC50_URL      = 'https://github.com/karoldvl/ESC-50/archive/master.zip'
+ESC50_ZIP_NAME = 'ESC-50-master.zip'
+ESC50_DIR_NAME = 'ESC-50-master'
+
+
+def _download_esc50(dest_dir: Path) -> Path:
+    """下載 ESC-50 zip 並解壓縮到 dest_dir，回傳 audio 資料夾路徑。"""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    zip_path  = dest_dir / ESC50_ZIP_NAME
+    audio_dir = dest_dir / ESC50_DIR_NAME / 'audio'
+
+    if audio_dir.exists():
+        print(f"[NoiseDataset] ESC-50 已存在：{audio_dir}")
+        return audio_dir
+
+    print(f"[NoiseDataset] 下載 ESC-50 中（約 600MB）...")
+    urllib.request.urlretrieve(ESC50_URL, zip_path)
+    print(f"[NoiseDataset] 解壓縮中...")
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        zf.extractall(dest_dir)
+    zip_path.unlink()
+    print(f"[NoiseDataset] ESC-50 已解壓至：{audio_dir}")
+    return audio_dir
 
 
 class NoiseDataset:
-    def __init__(self, soundscape_dir: str, chunk_length: int = 160000,
-                 max_files: int = 500, rng_seed: int = 42):
+    def __init__(self, esc50_dir: str, chunk_length: int = 160000,
+                 auto_download: bool = True, rng_seed: int = 42):
         """
-        soundscape_dir : train_soundscapes 資料夾路徑
-        chunk_length   : 每個噪音片段長度（samples），預設 5 秒 @ 32kHz
-        max_files      : 最多掃描幾支音訊（避免啟動太慢）
+        esc50_dir    : ESC-50 audio 資料夾路徑（即 ESC-50-master/audio/）
+        chunk_length : 每個噪音片段長度（samples），預設 5 秒 @ 32kHz
+        auto_download: 若 esc50_dir 不存在，自動下載 ESC-50
+        rng_seed     : 隨機種子
         """
         self.chunk_length = chunk_length
-        self.rng = np.random.default_rng(rng_seed)
-        self.chunks = []
-        self._build(Path(soundscape_dir), max_files)
-        print(f"[NoiseDataset] 收集到 {len(self.chunks)} 個低能量噪音片段")
+        self.rng          = np.random.default_rng(rng_seed)
+        self.chunks       = []
 
-    def _build(self, soundscape_dir: Path, max_files: int):
+        audio_dir = Path(esc50_dir)
+        if not audio_dir.exists():
+            if auto_download:
+                audio_dir = _download_esc50(audio_dir.parent)
+            else:
+                raise FileNotFoundError(
+                    f"找不到 ESC-50 資料夾：{audio_dir}，"
+                    "請設定 auto_download=True 或手動下載。"
+                )
+
+        self._build(audio_dir)
+        print(f"[NoiseDataset] 收集到 {len(self.chunks)} 個噪音片段"
+              f"（來自 {len(ALLOWED_TARGETS)} 個類別）")
+
+    def _build(self, audio_dir: Path):
         import librosa
-        files = sorted(soundscape_dir.glob('*.ogg'))[:max_files]
-        for fp in files:
+        for fp in sorted(audio_dir.glob('*.wav')):
+            try:
+                target = int(fp.stem.split('-')[-1])
+            except ValueError:
+                continue
+            if target not in ALLOWED_TARGETS:
+                continue
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
-                    # 只讀前 60 秒，避免載入整支長音訊
-                    y, _ = librosa.load(str(fp), sr=SAMPLE_RATE, mono=True,
-                                        duration=60.0)
+                    y, _ = librosa.load(str(fp), sr=SAMPLE_RATE, mono=True)
             except Exception:
                 continue
-
-            # 切成 chunk_length 片段，只保留低能量的（每支最多取 3 個）
-            n = min(len(y) // self.chunk_length, 3)
-            found = 0
-            for i in range(n):
-                chunk = y[i * self.chunk_length: (i + 1) * self.chunk_length]
-                rms = np.sqrt(np.mean(chunk ** 2))
-                if rms < RMS_THRESHOLD:
-                    self.chunks.append(chunk.astype(np.float32))
-                    found += 1
-            # 若前 3 個都沒有低能量片段，跳過此檔案
+            if len(y) >= self.chunk_length:
+                self.chunks.append(y[:self.chunk_length].astype(np.float32))
+            else:
+                self.chunks.append(np.pad(y, (0, self.chunk_length - len(y))).astype(np.float32))
 
     def sample(self) -> np.ndarray:
-        """隨機回傳一個噪音片段 (chunk_length,)"""
         if not self.chunks:
             return np.zeros(self.chunk_length, dtype=np.float32)
-        idx = self.rng.integers(len(self.chunks))
-        return self.chunks[idx].copy()
+        return self.chunks[self.rng.integers(len(self.chunks))].copy()
 
     def __len__(self):
         return len(self.chunks)

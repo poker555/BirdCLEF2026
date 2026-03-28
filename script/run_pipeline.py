@@ -129,6 +129,10 @@ def run_test_mode(base: Path):
     test_train_panns.write_text(textwrap.dedent("""
         import sys, os
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        # 清除舊的模組快取，確保載入最新版本
+        for _mod in list(sys.modules.keys()):
+            if any(_mod.startswith(p) for p in ['noise_dataset', 'train_panns', 'panns', 'soundscape_dataset']):
+                del sys.modules[_mod]
 
         if __name__ == '__main__':
             import torch, numpy as np, pandas as pd
@@ -190,11 +194,14 @@ def run_test_mode(base: Path):
 
             # 噪音混入
             noise_ds = None
-            if soundscape_dir.exists():
-                noise_ds = NoiseDataset(str(soundscape_dir), chunk_length=160000, max_files=10)
+            esc50_dir = base_dir / 'ESC-50-master' / 'audio'
+            try:
+                noise_ds = NoiseDataset(str(esc50_dir), chunk_length=160000, auto_download=False)
                 if len(noise_ds) == 0:
-                    print("[TEST PANNs] ⚠️  未找到低能量噪音片段，跳過噪音混入")
+                    print("[TEST PANNs] ⚠️  未找到噪音片段，跳過噪音混入")
                     noise_ds = None
+            except FileNotFoundError:
+                print("[TEST PANNs] ⚠️  ESC-50 不存在，跳過噪音混入")
 
             model              = PANNsCNN10(classes_num=234).to(device)
             criterion_species  = nn.BCEWithLogitsLoss()
@@ -311,9 +318,12 @@ def log_experiment(base: Path):
 
     fieldnames = [
         'run_id', 'model_name', 'model', 'best_f1', 'best_map', 'kaggle_roc_auc', 'epochs_trained',
-        'rare_threshold', 'augmentation', 'sampler',
-        'mixup_alpha', 'mixup_prob', 'soft_label_weight',
-        'val_strategy', 'aux_loss_weight', 'notes',
+        'rare_threshold', 'use_mixup', 'mixup_alpha', 'mixup_prob',
+        'use_noise_aug', 'noise_prob', 'noise_snr_range',
+        'use_spec_augment', 'use_label_smoothing', 'label_smoothing',
+        'use_grad_clip', 'grad_clip_norm', 'lr_scheduler',
+        'use_weighted_sampler', 'use_soundscape',
+        'soft_label_weight', 'aux_loss_weight', 'val_split', 'val_strategy',
     ]
 
     if not json_path.exists():

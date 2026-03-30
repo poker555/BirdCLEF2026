@@ -252,11 +252,11 @@ def main():
     if USE_SOUNDSCAPE and SOUNDSCAPE_DIR.exists() and LABELS_CSV.exists():
         sc_train_dataset = SoundscapeWaveformDataset(
             str(SOUNDSCAPE_DIR), str(LABELS_CSV), str(TAXONOMY_CSV),
-            split='train', sc_df=sc_df
+            split='train', sc_df=sc_df, rare_threshold=RARE_THRESHOLD
         )
         sc_val_dataset = SoundscapeWaveformDataset(
             str(SOUNDSCAPE_DIR), str(LABELS_CSV), str(TAXONOMY_CSV),
-            split='val', sc_df=sc_df
+            split='val', sc_df=sc_df, rare_threshold=RARE_THRESHOLD
         )
         sc_train_size = len(sc_train_dataset)
         train_dataset = ConcatDataset([train_dataset, sc_train_dataset])

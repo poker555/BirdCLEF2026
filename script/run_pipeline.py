@@ -109,7 +109,7 @@ def run_test_mode(base: Path):
                             for result in results:
                                 if result['status'] == 'success':
                                     sl, cid = task_map[result['h5_key']]
-                                    ds = h5_file.create_dataset(name=result['h5_key'], data=result['waveform'], compression='gzip', compression_opts=4)
+                                    ds = h5_file.create_dataset(name=result['h5_key'], data=result['waveform'], compression='lzf')
                                     ds.attrs['soft_label']  = sl
                                     ds.attrs['class_id']    = cid
                                     ds.attrs['sample_rate'] = pw.SAMPLE_RATE
@@ -142,7 +142,7 @@ def run_test_mode(base: Path):
             from sklearn.metrics import f1_score, average_precision_score
             from panns.dataset import PANNsDataset
             from panns.model import PANNsCNN10
-            from train_panns import build_split, build_sampler, mixup_data, add_noise
+            from train_panns import build_split, build_sampler, mixup_data, add_noise, CHUNK_LENGTH, RARE_THRESHOLD, NUM_CLASSES
             from noise_dataset import NoiseDataset
             from soundscape_dataset import SoundscapeWaveformDataset
 
@@ -155,8 +155,8 @@ def run_test_mode(base: Path):
             keys_train, keys_val = build_split(h5_path, sc_df)
             print(f"[TEST PANNs] 訓練 {len(keys_train)} 筆，驗證 {len(keys_val)} 筆")
 
-            train_ds = PANNsDataset(str(h5_path), keys_train, chunk_length=160000)
-            val_ds   = PANNsDataset(str(h5_path), keys_val,   chunk_length=160000) if keys_val else train_ds
+            train_ds = PANNsDataset(str(h5_path), keys_train, chunk_length=CHUNK_LENGTH)
+            val_ds   = PANNsDataset(str(h5_path), keys_val,   chunk_length=CHUNK_LENGTH) if keys_val else train_ds
 
             # Soundscape 資料集（有則加入，無則跳過）
             soundscape_dir = base_dir / 'train_soundscapes'
@@ -166,11 +166,11 @@ def run_test_mode(base: Path):
             if soundscape_dir.exists() and labels_csv.exists():
                 sc_train_ds = SoundscapeWaveformDataset(
                     str(soundscape_dir), str(labels_csv), str(taxonomy_csv),
-                    split='train', sc_df=sc_df
+                    split='train', sc_df=sc_df, rare_threshold=RARE_THRESHOLD
                 )
                 sc_val_ds = SoundscapeWaveformDataset(
                     str(soundscape_dir), str(labels_csv), str(taxonomy_csv),
-                    split='val', sc_df=sc_df
+                    split='val', sc_df=sc_df, rare_threshold=RARE_THRESHOLD
                 )
                 sc_train_size = len(sc_train_ds)
                 train_ds = ConcatDataset([train_ds, sc_train_ds])
@@ -196,14 +196,14 @@ def run_test_mode(base: Path):
             noise_ds = None
             esc50_dir = base_dir / 'ESC-50-master' / 'audio'
             try:
-                noise_ds = NoiseDataset(str(esc50_dir), chunk_length=160000, auto_download=False)
+                noise_ds = NoiseDataset(str(esc50_dir), chunk_length=CHUNK_LENGTH, auto_download=False)
                 if len(noise_ds) == 0:
                     print("[TEST PANNs] ⚠️  未找到噪音片段，跳過噪音混入")
                     noise_ds = None
             except FileNotFoundError:
                 print("[TEST PANNs] ⚠️  ESC-50 不存在，跳過噪音混入")
 
-            model              = PANNsCNN10(classes_num=234).to(device)
+            model              = PANNsCNN10(classes_num=NUM_CLASSES).to(device)
             criterion_species  = nn.BCEWithLogitsLoss()
             criterion_class    = nn.CrossEntropyLoss()
             optimizer          = optim.AdamW(model.parameters(), lr=1e-3)

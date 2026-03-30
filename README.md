@@ -85,15 +85,16 @@ H5_PATH     = BASE_DIR / "processed_data/train_waveforms.h5"
 ESC50_DIR   = BASE_DIR / "ESC-50-master/audio"  # 不存在時自動下載
 
 # ── 基本訓練參數 ────────────────────────────────────────────
-EPOCHS         = 100
+EPOCHS         = 200
 LR             = 1e-3
-BATCH_SIZE_GPU = 128
+NUM_WORKERS    = max(0, cpu_count() - 1)  # 自動偵測 CPU 核心數
+BATCH_SIZE     = None  # None = 依 VRAM 自動偵測（8GB→48, 16GB→96, 24GB→128...）
 
 # ── 技術開關 ────────────────────────────────────────────────
 USE_MIXUP            = True
-USE_NOISE_AUG        = True   # ESC-50 噪音混入，首次訓練自動下載（約 600MB）
-USE_SPEC_AUGMENT     = True
-USE_LABEL_SMOOTHING  = True
+USE_NOISE_AUG        = True   # ESC-50 自然環境音（雨、風、流水、雷雨），首次訓練自動下載
+USE_SPEC_AUGMENT     = True   # freq_mask=10, time_mask=20（保守設定）
+USE_LABEL_SMOOTHING  = False  # 關閉：BCE + soft label 已足夠
 USE_GRAD_CLIP        = True
 USE_WEIGHTED_SAMPLER = True
 LR_SCHEDULER         = 'cosine'  # 'cosine' 或 'plateau'
@@ -206,15 +207,16 @@ H5_PATH     = BASE_DIR / "processed_data/train_waveforms.h5"
 ESC50_DIR   = BASE_DIR / "ESC-50-master/audio"  # Auto-downloaded if missing
 
 # ── Training parameters ──────────────────────────────────────
-EPOCHS         = 100
+EPOCHS         = 200
 LR             = 1e-3
-BATCH_SIZE_GPU = 128
+NUM_WORKERS    = max(0, cpu_count() - 1)  # Auto-detected from CPU core count
+BATCH_SIZE     = None  # None = auto-detect from VRAM (8GB→48, 16GB→96, 24GB→128...)
 
 # ── Feature toggles ──────────────────────────────────────────
 USE_MIXUP            = True
-USE_NOISE_AUG        = True   # ESC-50 noise aug, auto-downloaded on first run (~600MB)
-USE_SPEC_AUGMENT     = True
-USE_LABEL_SMOOTHING  = True
+USE_NOISE_AUG        = True   # ESC-50 natural sounds (rain/wind/water/thunder), auto-downloaded
+USE_SPEC_AUGMENT     = True   # freq_mask=10, time_mask=20 (conservative)
+USE_LABEL_SMOOTHING  = False  # Disabled: BCE + soft label is sufficient
 USE_GRAD_CLIP        = True
 USE_WEIGHTED_SAMPLER = True
 LR_SCHEDULER         = 'cosine'  # 'cosine' or 'plateau'

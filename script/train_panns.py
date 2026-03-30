@@ -93,7 +93,7 @@ MIXUP_PROB  = 0.7
 # ── 噪音混入（ESC-50）─────────────────────────────────────────
 USE_NOISE_AUG   = True
 NOISE_PROB      = 0.5
-NOISE_SNR_RANGE = (5, 20)
+NOISE_SNR_RANGE = (15, 30)  # dB，越高噪音越輕微（噪音約為訊號的 3%～18%）
 
 # ── SpecAugment（模型內部）────────────────────────────────────
 USE_SPEC_AUGMENT  = True

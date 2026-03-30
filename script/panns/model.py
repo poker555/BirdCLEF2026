@@ -29,8 +29,12 @@ class ConvBlock(nn.Module):
 
 # === CNN10 模型本體 ===
 class PANNsCNN10(nn.Module):
-    def __init__(self, sample_rate=32000, window_size=1024, hop_size=320, mel_bins=160, classes_num=234, num_groups=5):
+    def __init__(self, sample_rate=32000, window_size=1024, hop_size=320, mel_bins=160,
+                 classes_num=234, num_groups=5,
+                 spec_freq_mask=10, spec_time_mask=20):
         super(PANNsCNN10, self).__init__()
+        self.spec_freq_mask = spec_freq_mask
+        self.spec_time_mask = spec_time_mask
 
         # GPU 內建的超狂頻譜轉換器！直接掛在網路的最前端
         self.mel_spectrogram = torchaudio.transforms.MelSpectrogram(
@@ -72,7 +76,9 @@ class PANNsCNN10(nn.Module):
 
         # SpecAugment（訓練時才套用）
         if self.training:
-            x = self._spec_augment(x)
+            x = self._spec_augment(x,
+                                   freq_mask_param=self.spec_freq_mask,
+                                   time_mask_param=self.spec_time_mask)
 
         x = self.conv_block1(x, pool_size=(2, 2))
         x = self.conv_block2(x, pool_size=(2, 2))

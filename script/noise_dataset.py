@@ -1,17 +1,11 @@
 """
 NoiseDataset：從 ESC-50 資料集下載並抽取指定類別的音訊作為噪音來源。
 
-保留類別（在野外生物錄音中可能出現的環境音）：
+保留類別（純自然環境音，模擬溼地錄音場景）：
   10 - rain          雨聲
-  13 - crickets      蟋蟀
-  15 - water_drops   水滴
   16 - wind          風聲
-  17 - pouring_water 流水
-  19 - thunderstorm  雷雨
-  25 - footsteps     腳步聲
-  26 - laughing      笑聲（人聲）
-  43 - car_horn      汽車喇叭
-  44 - engine        引擎聲
+  17 - pouring_water 流水聲
+  19 - thunderstorm  雷雨聲
 
 使用方式：
     noise_ds = NoiseDataset('ESC-50-master/audio')
@@ -27,7 +21,9 @@ from pathlib import Path
 SAMPLE_RATE = 32000
 
 # 保留的 ESC-50 target 編號
-ALLOWED_TARGETS = {10, 13, 15, 16, 17, 19, 25, 26, 43, 44}
+# 純自然環境音（溼地錄音場景）
+# 10-rain, 16-wind, 17-pouring_water, 19-thunderstorm
+ALLOWED_TARGETS = {10, 16, 17, 19}
 
 ESC50_URL      = 'https://github.com/karoldvl/ESC-50/archive/master.zip'
 ESC50_ZIP_NAME = 'ESC-50-master.zip'

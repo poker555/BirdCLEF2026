@@ -1,5 +1,6 @@
 import os
 import sys
+import multiprocessing
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -19,13 +20,113 @@ from noise_dataset import NoiseDataset
 import h5py
 from sklearn.model_selection import train_test_split
 
+# ==============================================================================
+# 路徑與參數設定 — 所有可調整的設定都在這裡
+# ==============================================================================
+
+# 專案根目錄（自動推算，不需手動修改）
+BASE_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent
+
+# ── 輸入路徑 ───────────────────────────────────────────────────
+H5_PATH        = BASE_DIR / "processed_data" / "train_waveforms.h5"
+SC_CSV         = BASE_DIR / "species_counts.csv"
+TRAIN_CSV      = BASE_DIR / "train.csv"
+TAXONOMY_CSV   = BASE_DIR / "taxonomy_encoded.csv"
+SOUNDSCAPE_DIR = BASE_DIR / "train_soundscapes"
+LABELS_CSV     = BASE_DIR / "train_soundscapes_labels.csv"
+
+# ── 輸出路徑 ───────────────────────────────────────────────────
+MODELS_DIR      = BASE_DIR / "models"
+BEST_MODEL_PATH = MODELS_DIR / "best_panns_model.pth"
+RESULT_JSON     = MODELS_DIR / "panns_train_result.json"
+
+# ── ESC-50 噪音資料集路徑（不存在時自動下載）─────────────────
+ESC50_DIR = BASE_DIR / "ESC-50-master" / "audio"
+
+# ── 基本訓練參數 ───────────────────────────────────────────────
+EPOCHS         = 200
+PATIENCE       = 7       # Early Stopping patience（以 mAP 為準）
+NUM_CLASSES    = 234
+CHUNK_LENGTH   = 160000  # 5 秒 @ 32kHz
+RARE_THRESHOLD = 5       # 稀少物種門檻，全進訓練集
+LR             = 1e-3
+WEIGHT_DECAY   = 1e-4
+
+# ── 自動偵測 num_workers（CPU 核心數 - 1，最少 0）─────────────
+NUM_WORKERS = max(0, multiprocessing.cpu_count() - 1)
+
+# ── 自動偵測 batch_size（依 VRAM 大小）────────────────────────
+# 手動覆蓋：將 BATCH_SIZE 設為非 None 的整數即可
+BATCH_SIZE = None  # None = 自動偵測
+
+def _auto_batch_size() -> int:
+    if BATCH_SIZE is not None:
+        return BATCH_SIZE
+    if not torch.cuda.is_available():
+        return 32
+    vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
+    if vram_gb >= 40:
+        return 256
+    elif vram_gb >= 24:
+        return 128
+    elif vram_gb >= 16:
+        return 96
+    elif vram_gb >= 12:
+        return 64
+    elif vram_gb >= 8:
+        return 48
+    else:
+        return 32
+
+# ── 損失函數 ───────────────────────────────────────────────────
+AUX_LOSS_WEIGHT = 0.2
+
+# ── Label Smoothing ────────────────────────────────────────────
+USE_LABEL_SMOOTHING = False   # 關閉：BCE + soft label 已足夠，雙重軟化反而模糊
+LABEL_SMOOTHING     = 0.05
+
+# ── MixUp ─────────────────────────────────────────────────────
+USE_MIXUP   = True
+MIXUP_ALPHA = 0.4
+MIXUP_PROB  = 0.7
+
+# ── 噪音混入（ESC-50）─────────────────────────────────────────
+USE_NOISE_AUG   = True
+NOISE_PROB      = 0.5
+NOISE_SNR_RANGE = (5, 20)
+
+# ── SpecAugment（模型內部）────────────────────────────────────
+USE_SPEC_AUGMENT  = True
+SPEC_FREQ_MASK    = 10   # 頻率遮罩最大寬度（原本 20，調小保留更多頻率資訊）
+SPEC_TIME_MASK    = 20   # 時間遮罩最大寬度（原本 40，調小保留更多時間資訊）
+
+# ── Gradient Clipping ─────────────────────────────────────────
+USE_GRAD_CLIP  = True
+GRAD_CLIP_NORM = 5.0
+
+# ── LR Scheduler：'cosine' 或 'plateau' ───────────────────────
+LR_SCHEDULER     = 'cosine'
+COSINE_ETA_MIN   = 1e-6
+PLATEAU_FACTOR   = 0.5
+PLATEAU_PATIENCE = 2
+
+# ── WeightedRandomSampler ─────────────────────────────────────
+USE_WEIGHTED_SAMPLER = True
+
+# ── Soundscape 資料集 ─────────────────────────────────────────
+USE_SOUNDSCAPE = True
+
+# ── 資料切分 ───────────────────────────────────────────────────
+VAL_SPLIT   = 0.2
+RANDOM_SEED = 42
+
+# ==============================================================================
+# 以下為程式邏輯，一般不需修改
+# ==============================================================================
+
 
 def add_noise(waveforms: torch.Tensor, noise_ds: 'NoiseDataset',
               prob: float = 0.5, snr_db_range=(5, 20)) -> torch.Tensor:
-    """
-    以 prob 機率對 batch 中每條波形混入一段隨機噪音。
-    SNR 在 snr_db_range 之間均勻取樣，確保鳥聲仍清晰可辨。
-    """
     if noise_ds is None or len(noise_ds) == 0:
         return waveforms
     result = waveforms.clone()
@@ -33,11 +134,9 @@ def add_noise(waveforms: torch.Tensor, noise_ds: 'NoiseDataset',
         if torch.rand(1).item() > prob:
             continue
         noise = torch.tensor(noise_ds.sample(), dtype=torch.float32).to(waveforms.device)
-        # 對齊長度
         if noise.shape[0] < result.shape[1]:
             noise = noise.repeat(result.shape[1] // noise.shape[0] + 1)
-        noise = noise[:result.shape[1]]
-        # 依目標 SNR 縮放噪音
+        noise   = noise[:result.shape[1]]
         snr_db  = torch.empty(1).uniform_(*snr_db_range).item()
         sig_rms = result[i].pow(2).mean().sqrt().clamp(min=1e-9)
         noi_rms = noise.pow(2).mean().sqrt().clamp(min=1e-9)
@@ -47,39 +146,12 @@ def add_noise(waveforms: torch.Tensor, noise_ds: 'NoiseDataset',
 
 
 def mixup_data(x, y, alpha=0.4):
-    lam = np.random.beta(alpha, alpha) if alpha > 0 else 1
+    lam   = np.random.beta(alpha, alpha) if alpha > 0 else 1
     index = torch.randperm(x.size(0)).to(x.device)
-    mixed_x = lam * x + (1 - lam) * x[index]
-    return mixed_x, y, y[index], lam
+    return lam * x + (1 - lam) * x[index], y, y[index], lam
 
 
-def spec_augment(mel: torch.Tensor,
-                 freq_mask_param: int = 20,
-                 time_mask_param: int = 40,
-                 num_freq_masks: int = 2,
-                 num_time_masks: int = 2) -> torch.Tensor:
-    """
-    SpecAugment：對 mel 頻譜圖套用頻率與時間遮罩。
-    輸入 mel shape: (B, 1, T, F)
-    """
-    out = mel.clone()
-    _, _, T, F = out.shape
-    for _ in range(num_freq_masks):
-        f = torch.randint(0, freq_mask_param, (1,)).item()
-        f0 = torch.randint(0, max(1, F - f), (1,)).item()
-        out[:, :, :, f0:f0 + f] = 0
-    for _ in range(num_time_masks):
-        t = torch.randint(0, time_mask_param, (1,)).item()
-        t0 = torch.randint(0, max(1, T - t), (1,)).item()
-        out[:, :, t0:t0 + t, :] = 0
-    return out
-
-
-def build_split(h5_path: Path, sc_df: pd.DataFrame, rare_threshold: int = 5):
-    """
-    稀少物種全進訓練集，一般物種 stratified 80/20 split。
-    增強版本（key 含後綴）全進訓練集。
-    """
+def build_split(h5_path: Path, sc_df: pd.DataFrame, rare_threshold: int = RARE_THRESHOLD):
     rare_species = set(sc_df[sc_df['audio_count'] <= rare_threshold]['primary_label'].astype(str))
     AUG_SUFFIXES = ('_ts09', '_ts11', '_ps+1', '_ps-1')
 
@@ -102,59 +174,41 @@ def build_split(h5_path: Path, sc_df: pd.DataFrame, rare_threshold: int = 5):
             normal_labels.append(label)
 
     normal_train, normal_val = train_test_split(
-        normal_orig, test_size=0.2, random_state=42, stratify=normal_labels
+        normal_orig, test_size=VAL_SPLIT, random_state=RANDOM_SEED, stratify=normal_labels
     )
-    aug_keys   = [k for k in all_keys if any(k.endswith(s) for s in AUG_SUFFIXES)]
-    keys_train = rare_train + normal_train + aug_keys
-    keys_val   = normal_val
-    return keys_train, keys_val
+    aug_keys = [k for k in all_keys if any(k.endswith(s) for s in AUG_SUFFIXES)]
+    return rare_train + normal_train + aug_keys, normal_val
 
 
 def build_sampler(h5_path: Path, keys_train: list, sc_df: pd.DataFrame,
                   train_df: pd.DataFrame = None):
-    """
-    weight = quality_weight(filename, rating) / sqrt(species_count)
-
-    - sqrt 平滑：避免 1/count 過於激進（499:1 → 22:1）
-    - 品質加權：只對 XC 音訊且 rating>0 有效，iNat 音訊維持 1.0
-      rating=5 → 1.0，rating=1 → 0.6，rating=0 或 iNat → 1.0
-    """
-    count_map = dict(zip(sc_df['primary_label'].astype(str), sc_df['audio_count']))
-
-    # 建立 filename -> rating 查詢表（只有 train_df 提供時才用）
+    count_map  = dict(zip(sc_df['primary_label'].astype(str), sc_df['audio_count']))
     rating_map = {}
     if train_df is not None:
         for _, row in train_df.iterrows():
             rating_map[str(row['filename'])] = float(row.get('rating', 0))
 
-    CHUNK = 160000
-    AUG_SUFFIXES = ('_ts09', '_ts11', '_ps+1', '_ps-1')
+    AUG_SUFFIXES    = ('_ts09', '_ts11', '_ps+1', '_ps-1')
     segment_weights = []
 
     with h5py.File(str(h5_path), 'r') as f:
         for key in keys_train:
             species = key.split('/')[0]
             cnt = count_map.get(species, 1)
+            w   = 1.0 / np.sqrt(cnt)
 
-            # sqrt 平滑，避免極端比例
-            w = 1.0 / np.sqrt(cnt)
-
-            # 品質加權：還原原始 filename（去掉增強後綴）
             base_fname = key
             for suf in AUG_SUFFIXES:
                 if key.endswith(suf):
                     base_fname = key[:-len(suf)]
                     break
-            rating = rating_map.get(base_fname, 0)
+            rating     = rating_map.get(base_fname, 0)
             fname_stem = base_fname.split('/')[-1] if '/' in base_fname else base_fname
             if 'XC' in fname_stem and rating > 0:
-                # rating=5 → 1.0，rating=1 → 0.6，線性映射
-                quality_w = 0.5 + (rating / 5.0) * 0.5
-                w *= quality_w
+                w *= 0.5 + (rating / 5.0) * 0.5
 
             try:
-                total_samples = f[key].shape[0]
-                n_seg = max(1, total_samples // CHUNK)
+                n_seg = max(1, f[key].shape[0] // CHUNK_LENGTH)
             except Exception:
                 n_seg = 1
             segment_weights.extend([w] * n_seg)
@@ -163,33 +217,45 @@ def build_sampler(h5_path: Path, keys_train: list, sc_df: pd.DataFrame,
 
 
 def main():
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"目前運算裝置: {device}")
+    device     = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    batch_size = _auto_batch_size()
 
-    base_dir = Path(os.path.dirname(os.path.abspath(__file__))).parent
-    h5_path  = base_dir / "processed_data" / "train_waveforms.h5"
-    sc_df    = pd.read_csv(base_dir / "species_counts.csv")
-    train_df = pd.read_csv(base_dir / "train.csv")
+    print(f"目前運算裝置: {device}")
+    if device.type == 'cuda':
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
+        print(f"GPU: {torch.cuda.get_device_name(0)}  VRAM: {vram_gb:.1f} GB")
+    print(f"CPU 核心數: {multiprocessing.cpu_count()}  num_workers: {NUM_WORKERS}")
+    print(f"batch_size: {batch_size}{'（手動）' if BATCH_SIZE is not None else '（自動偵測）'}")
+
+    print("\n── 技術開關狀態 ──────────────────────────────")
+    print(f"  MixUp:             {'ON' if USE_MIXUP else 'OFF'}  (alpha={MIXUP_ALPHA}, prob={MIXUP_PROB})")
+    print(f"  Noise Augment:     {'ON' if USE_NOISE_AUG else 'OFF'}  (prob={NOISE_PROB}, SNR={NOISE_SNR_RANGE}dB)")
+    print(f"  SpecAugment:       {'ON' if USE_SPEC_AUGMENT else 'OFF'}")
+    print(f"  Label Smoothing:   {'ON' if USE_LABEL_SMOOTHING else 'OFF'}")
+    print(f"  Grad Clipping:     {'ON' if USE_GRAD_CLIP else 'OFF'}  (max_norm={GRAD_CLIP_NORM})")
+    print(f"  LR Scheduler:      {LR_SCHEDULER}")
+    print(f"  Weighted Sampler:  {'ON' if USE_WEIGHTED_SAMPLER else 'OFF'}")
+    print(f"  Soundscape Data:   {'ON' if USE_SOUNDSCAPE else 'OFF'}")
+    print("──────────────────────────────────────────────\n")
+
+    sc_df    = pd.read_csv(SC_CSV)
+    train_df = pd.read_csv(TRAIN_CSV)
 
     print("建立訓練/驗證切分...")
-    keys_train, keys_val = build_split(h5_path, sc_df)
+    keys_train, keys_val = build_split(H5_PATH, sc_df)
     print(f"訓練集 {len(keys_train)} 筆（含增強），驗證集 {len(keys_val)} 筆")
 
-    train_dataset = PANNsDataset(str(h5_path), keys_train, chunk_length=160000)
-    val_dataset   = PANNsDataset(str(h5_path), keys_val,   chunk_length=160000)
+    train_dataset = PANNsDataset(str(H5_PATH), keys_train, chunk_length=CHUNK_LENGTH)
+    val_dataset   = PANNsDataset(str(H5_PATH), keys_val,   chunk_length=CHUNK_LENGTH)
 
-    # soundscape 分流：train 部分加入訓練集，val 部分加入驗證集
-    soundscape_dir = base_dir / 'train_soundscapes'
-    labels_csv     = base_dir / 'train_soundscapes_labels.csv'
-    taxonomy_csv   = base_dir / 'taxonomy_encoded.csv'
-    sc_train_size  = 0
-    if soundscape_dir.exists() and labels_csv.exists():
+    sc_train_size = 0
+    if USE_SOUNDSCAPE and SOUNDSCAPE_DIR.exists() and LABELS_CSV.exists():
         sc_train_dataset = SoundscapeWaveformDataset(
-            str(soundscape_dir), str(labels_csv), str(taxonomy_csv),
+            str(SOUNDSCAPE_DIR), str(LABELS_CSV), str(TAXONOMY_CSV),
             split='train', sc_df=sc_df
         )
         sc_val_dataset = SoundscapeWaveformDataset(
-            str(soundscape_dir), str(labels_csv), str(taxonomy_csv),
+            str(SOUNDSCAPE_DIR), str(LABELS_CSV), str(TAXONOMY_CSV),
             split='val', sc_df=sc_df
         )
         sc_train_size = len(sc_train_dataset)
@@ -199,76 +265,67 @@ def main():
 
     print(f"訓練集總計 {len(train_dataset)} 個片段，驗證集 {len(val_dataset)} 個片段")
 
-    # WeightedRandomSampler：HDF5 片段 + soundscape 片段
-    segment_weights = build_sampler(h5_path, keys_train, sc_df, train_df=train_df)
-    if sc_train_size > 0:
-        count_map = dict(zip(sc_df['primary_label'].astype(str), sc_df['audio_count']))
-        tax_df    = pd.read_csv(taxonomy_csv)
-        # label_id -> primary_label 反查表
-        id_to_sp  = {int(r['label_id']): str(r['primary_label']) for _, r in tax_df.iterrows()}
-        for sample in sc_train_dataset.samples:
-            primary_idx = int(np.argmax(sample['soft_label']))
-            sp  = id_to_sp.get(primary_idx, '')
-            cnt = count_map.get(sp, 1)
-            # 稀少物種（0筆）給 weight=2.0，其餘 1/sqrt(count)
-            w   = 2.0 if cnt == 0 else 1.0 / np.sqrt(max(cnt, 1))
-            segment_weights.append(w)
+    if USE_WEIGHTED_SAMPLER:
+        segment_weights = build_sampler(H5_PATH, keys_train, sc_df, train_df=train_df)
+        if sc_train_size > 0:
+            count_map = dict(zip(sc_df['primary_label'].astype(str), sc_df['audio_count']))
+            tax_df    = pd.read_csv(TAXONOMY_CSV)
+            id_to_sp  = {int(r['label_id']): str(r['primary_label']) for _, r in tax_df.iterrows()}
+            for sample in sc_train_dataset.samples:
+                primary_idx = int(np.argmax(sample['soft_label']))
+                sp  = id_to_sp.get(primary_idx, '')
+                cnt = count_map.get(sp, 1)
+                w   = 2.0 if cnt == 0 else 1.0 / np.sqrt(max(cnt, 1))
+                segment_weights.append(w)
+        sampler      = WeightedRandomSampler(segment_weights, len(segment_weights), replacement=True)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler,
+                                  num_workers=NUM_WORKERS, pin_memory=(device.type == 'cuda'),
+                                  persistent_workers=(NUM_WORKERS > 0))
+    else:
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+                                  num_workers=NUM_WORKERS, pin_memory=(device.type == 'cuda'),
+                                  persistent_workers=(NUM_WORKERS > 0))
 
-    sampler = WeightedRandomSampler(
-        weights=segment_weights,
-        num_samples=len(segment_weights),
-        replacement=True
-    )
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
+                            num_workers=NUM_WORKERS, pin_memory=(device.type == 'cuda'),
+                            persistent_workers=(NUM_WORKERS > 0))
 
-    # 高算力環境：num_workers=4，batch_size=128
-    # Windows 本機：num_workers=0，batch_size=64
-    is_high_perf = (device.type == 'cuda') and torch.cuda.device_count() >= 1
-    num_workers = 4 if is_high_perf else 0
-    batch_size  = 128 if is_high_perf else 64
-    print(f"DataLoader: num_workers={num_workers}, batch_size={batch_size}")
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler,
-                              num_workers=num_workers, pin_memory=(device.type == 'cuda'),
-                              persistent_workers=(num_workers > 0))
-    val_loader   = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
-                              num_workers=num_workers, pin_memory=(device.type == 'cuda'),
-                              persistent_workers=(num_workers > 0))
+    model = PANNsCNN10(classes_num=NUM_CLASSES,
+                       spec_freq_mask=SPEC_FREQ_MASK,
+                       spec_time_mask=SPEC_TIME_MASK).to(device)
+    if not USE_SPEC_AUGMENT:
+        model._spec_augment = lambda x, **kw: x
 
-    model = PANNsCNN10(classes_num=234).to(device)
-    # Label Smoothing：BCEWithLogitsLoss 加 smoothing=0.05
-    smoothing = 0.05
-    criterion_species = nn.BCEWithLogitsLoss(
-        pos_weight=None,
-        reduction='mean'
-    )
-    criterion_class   = nn.CrossEntropyLoss(label_smoothing=0.05)
-    optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    # Cosine Annealing LR（取代 ReduceLROnPlateau）
-    epochs   = 100
-    patience = 7
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=epochs, eta_min=1e-6
-    )
+    smoothing         = LABEL_SMOOTHING if USE_LABEL_SMOOTHING else 0.0
+    criterion_species = nn.BCEWithLogitsLoss(reduction='mean')
+    criterion_class   = nn.CrossEntropyLoss(label_smoothing=smoothing)
+    optimizer         = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+
+    if LR_SCHEDULER == 'cosine':
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=EPOCHS, eta_min=COSINE_ETA_MIN
+        )
+    else:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='max', factor=PLATEAU_FACTOR, patience=PLATEAU_PATIENCE
+        )
+
     scaler = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
 
-    # 噪音混入：優先使用 ESC-50，補充 train_soundscapes 低能量片段
-    esc50_dir = base_dir / 'ESC-50-master' / 'audio'
-    noise_ds = NoiseDataset(
-        esc50_dir=str(esc50_dir),
-        chunk_length=CHUNK_LENGTH,
-        auto_download=True,
-    )
-    if len(noise_ds) == 0:
-        print("⚠️  未找到噪音片段，跳過噪音混入增強")
-        noise_ds = None
+    noise_ds = None
+    if USE_NOISE_AUG:
+        noise_ds = NoiseDataset(str(ESC50_DIR), chunk_length=CHUNK_LENGTH, auto_download=True)
+        if len(noise_ds) == 0:
+            print("⚠️  未找到噪音片段，跳過噪音混入增強")
+            noise_ds = None
 
-    epochs   = 100
-    patience = 7
+    MODELS_DIR.mkdir(exist_ok=True)
     best_f1  = 0.0
     best_map = 0.0
     counter  = 0
     print("開始 PANNs 模型訓練")
 
-    for epoch in range(epochs):
+    for epoch in range(EPOCHS):
         model.train()
         total_loss = 0.0
 
@@ -281,43 +338,45 @@ def main():
             with torch.amp.autocast('cuda' if device.type == 'cuda' else 'cpu',
                                     dtype=torch.bfloat16,
                                     enabled=(device.type == 'cuda')):
-                if torch.rand(1).item() > 0.3:
-                    mixed_wav, labels_a, labels_b, lam = mixup_data(waveforms, soft_labels)
-                    # 噪音混入增強（在 MixUp 之後，p=0.5，SNR 5~20 dB）
-                    mixed_wav = add_noise(mixed_wav, noise_ds, prob=0.5, snr_db_range=(5, 20))
+                if USE_MIXUP and torch.rand(1).item() < MIXUP_PROB:
+                    mixed_wav, labels_a, labels_b, lam = mixup_data(waveforms, soft_labels, alpha=MIXUP_ALPHA)
+                    if USE_NOISE_AUG:
+                        mixed_wav = add_noise(mixed_wav, noise_ds, prob=NOISE_PROB, snr_db_range=NOISE_SNR_RANGE)
                     logits_species, logits_class = model(mixed_wav)
                     mixed_soft = lam * labels_a + (1 - lam) * labels_b
-                    # Label smoothing for BCE
-                    mixed_soft = mixed_soft * (1 - smoothing) + smoothing / mixed_soft.shape[1]
+                    if USE_LABEL_SMOOTHING:
+                        mixed_soft = mixed_soft * (1 - smoothing) + smoothing / mixed_soft.shape[1]
                     loss_species = criterion_species(logits_species, mixed_soft)
                 else:
-                    # 噪音混入增強（在 MixUp 之後，p=0.5，SNR 5~20 dB）
-                    waveforms = add_noise(waveforms, noise_ds, prob=0.5, snr_db_range=(5, 20))
+                    if USE_NOISE_AUG:
+                        waveforms = add_noise(waveforms, noise_ds, prob=NOISE_PROB, snr_db_range=NOISE_SNR_RANGE)
                     logits_species, logits_class = model(waveforms)
-                    soft_labels_s = soft_labels * (1 - smoothing) + smoothing / soft_labels.shape[1]
+                    soft_labels_s = soft_labels * (1 - smoothing) + smoothing / soft_labels.shape[1] \
+                                    if USE_LABEL_SMOOTHING else soft_labels
                     loss_species = criterion_species(logits_species, soft_labels_s)
+
                 loss_class = criterion_class(logits_class, class_labels)
-                loss = loss_species + 0.2 * loss_class
+                loss = loss_species + AUX_LOSS_WEIGHT * loss_class
 
             scaler.scale(loss).backward()
-            # Gradient Clipping（防止梯度爆炸）
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            if USE_GRAD_CLIP:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_CLIP_NORM)
             scaler.step(optimizer)
             scaler.update()
             total_loss += loss.item()
 
             if batch_idx % 10 == 0:
-                print(f"Epoch[{epoch+1}/{epochs}] Batch[{batch_idx}/{len(train_loader)}] "
+                print(f"Epoch[{epoch+1}/{EPOCHS}] Batch[{batch_idx}/{len(train_loader)}] "
                       f"Loss: {loss.item():.4f} (sp: {loss_species.item():.4f}, cl: {loss_class.item():.4f})")
 
         print(f"Epoch {epoch+1} 平均 Loss: {total_loss/len(train_loader):.4f}")
 
         model.eval()
-        n_val = len(val_dataset)
-        all_probs_np   = np.empty((n_val, 234), dtype=np.float32)
-        all_preds      = np.empty(n_val, dtype=np.int64)
-        all_targets    = np.empty(n_val, dtype=np.int64)
+        n_val        = len(val_dataset)
+        all_probs_np = np.empty((n_val, NUM_CLASSES), dtype=np.float32)
+        all_preds    = np.empty(n_val, dtype=np.int64)
+        all_targets  = np.empty(n_val, dtype=np.int64)
         ptr = 0
 
         with torch.no_grad():
@@ -335,10 +394,8 @@ def main():
                 all_targets[ptr:ptr + b]  = soft_labels.argmax(dim=1).cpu().numpy()
                 ptr += b
 
-        # macro F1（argmax 預測）
         val_f1 = f1_score(all_targets[:ptr], all_preds[:ptr], average='macro', zero_division=0)
 
-        # mAP：只計算驗證集中有出現的類別
         targets_onehot  = np.zeros_like(all_probs_np[:ptr])
         for i, t in enumerate(all_targets[:ptr]):
             targets_onehot[i, t] = 1.0
@@ -351,58 +408,73 @@ def main():
 
         current_lr = optimizer.param_groups[0]['lr']
         print(f"Epoch {epoch+1} | F1: {val_f1:.4f} | mAP: {val_map:.4f} | LR: {current_lr:.6f}")
-        scheduler.step()  # Cosine Annealing：每 epoch 更新
+
+        if LR_SCHEDULER == 'cosine':
+            scheduler.step()
+        else:
+            scheduler.step(val_map)
 
         if val_map > best_map:
             best_map = val_map
             best_f1  = val_f1
             counter  = 0
-            torch.save(model.state_dict(), base_dir / 'models' / 'best_panns_model.pth')
-            print(f"==> 最佳模型已儲存（暫存為 best_panns_model.pth）")
+            torch.save(model.state_dict(), BEST_MODEL_PATH)
+            print(f"==> 最佳模型已儲存：{BEST_MODEL_PATH.name}")
         else:
             counter += 1
-            print(f"mAP 未提升，累積 {counter}/{patience}")
-            if counter >= patience:
+            print(f"mAP 未提升，累積 {counter}/{PATIENCE}")
+            if counter >= PATIENCE:
                 print("==> Early Stopping")
                 break
 
-    # 決定本次模型的北約名稱（依 models/ 下已有的命名檔案自動遞增）
     NATO = [
         'alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf',
         'hotel', 'india', 'juliet', 'kilo', 'lima', 'mike', 'november',
         'oscar', 'papa', 'quebec', 'romeo', 'sierra', 'tango', 'uniform',
         'victor', 'whiskey', 'xray', 'yankee', 'zulu'
     ]
-    existing = {p.stem.replace('model_', '') for p in (base_dir / 'models').glob('model_*.pth')}
-    model_codename = next((n for n in NATO if n not in existing), f'model_{len(existing)}')
-    named_model_path = base_dir / 'models' / f'model_{model_codename}.pth'
+    existing         = {p.stem.replace('model_', '') for p in MODELS_DIR.glob('model_*.pth')}
+    model_codename   = next((n for n in NATO if n not in existing), f'model_{len(existing)}')
+    named_model_path = MODELS_DIR / f'model_{model_codename}.pth'
     import shutil
-    shutil.copy(base_dir / 'models' / 'best_panns_model.pth', named_model_path)
+    shutil.copy(BEST_MODEL_PATH, named_model_path)
     print(f"==> 模型已命名並儲存：{named_model_path.name}")
 
-    # 訓練結果寫入 JSON，供 run_pipeline.py 讀取後追加到 experiment_log.csv
     import json
     result = {
-        'model_name':         model_codename,
-        'model':              'panns',
-        'best_f1':            round(best_f1, 6),
-        'best_map':           round(best_map, 6),
-        'kaggle_roc_auc':     '',
-        'epochs_trained':     epoch + 1,
-        'rare_threshold':     5,
-        'augmentation':       'time_stretch_0.9/1.1, pitch_shift_+/-1',
-        'sampler':            'WeightedRandomSampler(quality_weight/sqrt(species_count))',
-        'mixup_alpha':        0.4,
-        'mixup_prob':         0.7,
-        'soft_label_weight':  0.3,
-        'val_strategy':       'rare_all_train + stratified_80_20 + soundscape',
-        'aux_loss_weight':    0.2,
-        'notes': 'n_fft=1024, n_mels=160, ESC-50 noise aug, SpecAugment, CosineAnnealingLR, label_smoothing=0.05, grad_clip=5.0',
+        'model_name':           model_codename,
+        'model':                'panns',
+        'best_f1':              round(best_f1, 6),
+        'best_map':             round(best_map, 6),
+        'kaggle_roc_auc':       '',
+        'epochs_trained':       epoch + 1,
+        'rare_threshold':       RARE_THRESHOLD,
+        'use_mixup':            USE_MIXUP,
+        'mixup_alpha':          MIXUP_ALPHA,
+        'mixup_prob':           MIXUP_PROB,
+        'use_noise_aug':        USE_NOISE_AUG,
+        'noise_prob':           NOISE_PROB,
+        'noise_snr_range':      str(NOISE_SNR_RANGE),
+        'use_spec_augment':     USE_SPEC_AUGMENT,
+        'spec_freq_mask':       SPEC_FREQ_MASK,
+        'spec_time_mask':       SPEC_TIME_MASK,
+        'use_label_smoothing':  USE_LABEL_SMOOTHING,
+        'label_smoothing':      LABEL_SMOOTHING,
+        'use_grad_clip':        USE_GRAD_CLIP,
+        'grad_clip_norm':       GRAD_CLIP_NORM,
+        'lr_scheduler':         LR_SCHEDULER,
+        'use_weighted_sampler': USE_WEIGHTED_SAMPLER,
+        'use_soundscape':       USE_SOUNDSCAPE,
+        'aux_loss_weight':      AUX_LOSS_WEIGHT,
+        'soft_label_weight':    0.3,
+        'val_split':            VAL_SPLIT,
+        'val_strategy':         'rare_all_train + stratified_80_20 + soundscape',
+        'batch_size':           batch_size,
+        'num_workers':          NUM_WORKERS,
     }
-    out_path = base_dir / 'models' / 'panns_train_result.json'
-    with open(out_path, 'w', encoding='utf-8') as f:
+    with open(RESULT_JSON, 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
-    print(f"訓練結果已寫入 {out_path}")
+    print(f"訓練結果已寫入 {RESULT_JSON}")
     print("PANNs 訓練完成")
 
 

@@ -12,3 +12,13 @@ models/
 submission.csv
 __pycache__/
 *.pyc
+
+# 資料檔
+processed_data/*.h5
+voice_detection_report.csv
+
+# ESC-50 音訊（大量 wav）
+ESC-50-master/audio/
+
+# 論文 PDF
+paper/
